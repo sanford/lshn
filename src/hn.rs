@@ -166,6 +166,34 @@ pub fn story(id: u64) -> Result<Story, String> {
 }
 
 #[derive(Deserialize)]
+struct SearchResults {
+    hits: Vec<SearchHit>,
+}
+
+#[derive(Deserialize)]
+struct SearchHit {
+    #[serde(rename = "objectID")]
+    id: String,
+}
+
+/// Stories matching `query`, best first, from Algolia's search.
+pub fn search(query: &str) -> Result<Vec<u64>, String> {
+    let results: SearchResults = agent()
+        .get(format!("{ALGOLIA}/search"))
+        .query("query", query)
+        .query("tags", "story")
+        .query("hitsPerPage", "60")
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .with_config()
+        .limit(MAX_JSON)
+        .read_json()
+        .map_err(|e| e.to_string())?;
+    Ok(results.hits.iter().filter_map(|h| h.id.parse().ok()).collect())
+}
+
+#[derive(Deserialize)]
 struct AlgoliaItem {
     id: u64,
     author: Option<String>,

@@ -123,6 +123,7 @@ fn run(args: Args) -> io::Result<()> {
         choice,
         omarchy: palette.is_some(),
         feed,
+        mute: config.mute,
     };
     tui::run(theme, settings)
 }

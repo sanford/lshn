@@ -23,6 +23,8 @@ pub enum Prompt {
     Hints { typed: String },
     /// The outline or the themes.
     Pick(Picker),
+    /// Typing a search of all of HN's stories.
+    SearchHn { query: String },
     /// Confirming opening something outside lshn.
     Open(crate::open::Target),
 }
@@ -170,6 +172,19 @@ impl App {
                 Outcome::Choose(target) => self.go(target),
                 Outcome::Quit => return true,
             },
+            Prompt::SearchHn { mut query } => match key.code {
+                KeyCode::Esc => {}
+                KeyCode::Enter if !query.trim().is_empty() => self.search_hn(query.trim().to_string()),
+                KeyCode::Backspace => {
+                    query.pop();
+                    self.prompt = Some(Prompt::SearchHn { query });
+                }
+                KeyCode::Char(c) if !ctrl => {
+                    query.push(c);
+                    self.prompt = Some(Prompt::SearchHn { query });
+                }
+                _ => self.prompt = Some(Prompt::SearchHn { query }),
+            },
             Prompt::Open(target) => {
                 if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
                     self.flash = Some(match crate::open::open(&target) {
@@ -270,6 +285,12 @@ impl App {
                 "  esc cancels".dim(),
             ]),
             Prompt::Pick(_) => Line::from(" ↑↓ move  / filter  ⏎ go  esc close  q quit".dim()),
+            Prompt::SearchHn { query } => Line::from(vec![
+                " Search HN: ".bold(),
+                Span::raw(query.clone()),
+                "▏".slow_blink(),
+                "  ⏎ search  esc cancel".dim(),
+            ]),
             Prompt::Open(target) => Line::from(vec![
                 " Open ".bold(),
                 Span::raw(target.what.clone()),

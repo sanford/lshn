@@ -7,6 +7,7 @@
 //! mouse = false           # leave the mouse to the terminal
 //! outline = true          # show the outline pane beside stories
 //! feed = "best"           # the list to start with: top, new, best, ask, show or jobs
+//! mute = ["example.com", "crypto"]  # hide stories from these sites, or with these words
 //! ```
 
 use crate::hn::Feed;
@@ -22,6 +23,7 @@ pub struct Config {
     pub mouse: Option<bool>,
     pub outline: Option<bool>,
     pub feed: Option<Feed>,
+    pub mute: Vec<String>,
 }
 
 pub fn path() -> Option<PathBuf> {
@@ -146,7 +148,7 @@ mod tests {
     #[test]
     fn parses_every_setting() {
         let c = parse(
-            "theme = \"light\"\nwidth = 100\nmouse = false\noutline = true\nfeed = \"best\"\n",
+            "theme = \"light\"\nwidth = 100\nmouse = false\noutline = true\nfeed = \"best\"\nmute = [\"x.com\"]\n",
         )
         .unwrap();
         assert_eq!(c.theme, Some(Choice::Mode(crate::theme::Mode::Light)));
@@ -154,6 +156,7 @@ mod tests {
         assert_eq!(c.mouse, Some(false));
         assert_eq!(c.outline, Some(true));
         assert_eq!(c.feed, Some(Feed::Best));
+        assert_eq!(c.mute, ["x.com"]);
     }
 
     #[test]

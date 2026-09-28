@@ -30,6 +30,7 @@ In the list:
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title |
 | `1`–`6` | Top, New, Best, Ask, Show, Jobs |
+| `s` | Search all of HN's stories: the matches, best first, become the list |
 | `q` `Esc` | Quit |
 
 Reading:
@@ -69,6 +70,8 @@ What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stori
 
 Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, and `w` opens them in the browser.
 
+Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer.
+
 Everything a story or comment says is treated as text: none of it can become formatting, or reach the terminal as a control sequence.
 
 ### Settings
@@ -81,6 +84,8 @@ width = 100             # wrap text at 100 columns
 feed = "best"           # the list to start with
 mouse = false           # leave the mouse to the terminal
 outline = true          # show the outline beside stories
+mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
+                                  # or with these words or phrases in their titles
 ```
 
 ## Building

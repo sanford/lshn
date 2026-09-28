@@ -56,6 +56,8 @@ pub struct Settings {
     pub omarchy: bool,
     /// The list to start with.
     pub feed: Feed,
+    /// Sites and words whose stories aren't listed.
+    pub mute: Vec<String>,
 }
 
 pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
@@ -79,6 +81,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     app.omarchy = settings.omarchy;
     app.mouse_on = settings.mouse;
     app.outline_pane = settings.outline;
+    app.mute = settings.mute;
     app.open_feed(settings.feed);
     let mut terminal = ratatui::init();
     set_mouse(app.mouse_on, true);
@@ -152,12 +155,16 @@ struct App {
     /// Jobs asked for and not yet back.
     waiting: usize,
     feed: Feed,
-    /// The feed's stories, in order, once it's loaded.
+    /// A search of HN, whose results are the list instead of the feed's.
+    search: Option<String>,
+    /// The list's stories, in order, once it's loaded.
     ids: Option<Vec<u64>>,
     feed_error: Option<String>,
     stories: HashMap<u64, Story>,
     /// Stories that couldn't be loaded, or are dead or deleted.
     gone: HashSet<u64>,
+    /// Sites and words whose stories aren't listed.
+    mute: Vec<String>,
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
     docs: HashMap<DocKey, Doc>,
@@ -226,10 +233,12 @@ impl App {
             asked: HashSet::new(),
             waiting: 0,
             feed: Feed::Top,
+            search: None,
             ids: None,
             feed_error: None,
             stories: HashMap::new(),
             gone: HashSet::new(),
+            mute: Vec::new(),
             threads: HashMap::new(),
             articles: HashMap::new(),
             docs: HashMap::new(),
@@ -307,6 +316,7 @@ impl App {
 
     fn open_feed(&mut self, feed: Feed) {
         self.feed = feed;
+        self.search = None;
         self.ids = None;
         self.feed_error = None;
         self.filter.clear();
@@ -318,14 +328,45 @@ impl App {
         *self.list.offset_mut() = 0;
     }
 
+    /// Lists the stories matching `query`, best first.
+    fn search_hn(&mut self, query: String) {
+        self.search = Some(query.clone());
+        self.ids = None;
+        self.feed_error = None;
+        self.filter.clear();
+        self.typing = false;
+        self.focus = Focus::List;
+        self.waiting += 1;
+        self.fetcher.push(Job::Search(query), true);
+        self.refresh();
+        self.list.select(None);
+        *self.list.offset_mut() = 0;
+    }
+
+    /// What the list is: a feed's name, or "Search".
+    fn list_name(&self) -> &'static str {
+        match self.search {
+            Some(_) => "Search",
+            None => self.feed.name(),
+        }
+    }
+
     /// Fetches everything again, keeping what's shown until it's replaced.
     /// Articles don't change, so they stay.
     fn reload(&mut self) {
         self.asked.retain(|a| matches!(a, Asked::Article(_)));
         self.gone.clear();
-        let feed = self.feed;
-        self.ask(Asked::Feed(feed), Job::Feed(feed), true);
-        self.flash = Some(format!("Reloading {}…", feed.name()));
+        match self.search.clone() {
+            Some(query) => {
+                self.waiting += 1;
+                self.fetcher.push(Job::Search(query), true);
+            }
+            None => {
+                let feed = self.feed;
+                self.ask(Asked::Feed(feed), Job::Feed(feed), true);
+            }
+        }
+        self.flash = Some(format!("Reloading {}…", self.list_name()));
     }
 
     /// Takes in whatever the fetcher has sent back. A cached copy shows
@@ -338,7 +379,7 @@ impl App {
                 self.waiting = self.waiting.saturating_sub(1);
             }
             match got {
-                Got::Feed(feed, result) if feed == self.feed => {
+                Got::Feed(feed, result) if feed == self.feed && self.search.is_none() => {
                     match result {
                         Ok(ids) => {
                             self.ids = Some(ids);
@@ -352,6 +393,14 @@ impl App {
                     list_changed = true;
                 }
                 Got::Feed(..) => {}
+                Got::Search(query, result) if self.search.as_ref() == Some(&query) => {
+                    match result {
+                        Ok(ids) => self.ids = Some(ids),
+                        Err(e) => self.feed_error = Some(e),
+                    }
+                    list_changed = true;
+                }
+                Got::Search(..) => {}
                 Got::Story(id, Ok(story)) if !story.dead && !story.deleted => {
                     self.stories.insert(id, story);
                     self.rebuild(id);
@@ -524,10 +573,11 @@ impl App {
     fn refresh(&mut self) {
         let keep = self.selected_id();
         let ids = self.ids.as_deref().unwrap_or_default();
-        let listed = ids.iter().filter(|id| !self.gone.contains(id));
+        let listed: Vec<u64> = ids.iter().copied().filter(|&id| !self.hidden(id)).collect();
         if self.filter.is_empty() {
             self.shown = listed
-                .map(|&id| Shown {
+                .into_iter()
+                .map(|id| Shown {
                     id,
                     hits: Vec::new(),
                 })
@@ -543,7 +593,7 @@ impl App {
             );
             let mut buf = Vec::new();
             let mut scored = Vec::new();
-            for &id in listed {
+            for id in listed {
                 let Some(story) = self.stories.get(&id) else {
                     continue;
                 };
@@ -710,6 +760,11 @@ impl App {
     fn view_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         match key.code {
             KeyCode::Tab => self.switch_view(),
+            KeyCode::Char('s') if !ctrl => {
+                self.prompt = Some(nav::Prompt::SearchHn {
+                    query: self.search.clone().unwrap_or_default(),
+                });
+            }
             KeyCode::Char('>') => self.next_story(1),
             KeyCode::Char('<') => self.next_story(-1),
             KeyCode::Char('c') if !ctrl => self.toggle_comments(),
@@ -724,7 +779,7 @@ impl App {
             KeyCode::Char(c @ '1'..='6') => {
                 let feed = Feed::ALL[c as usize - '1' as usize];
                 self.focus = Focus::List;
-                if feed != self.feed {
+                if feed != self.feed || self.search.is_some() {
                     self.open_feed(feed);
                 }
             }
@@ -946,13 +1001,18 @@ impl App {
         let mut title = vec![" lshn ".bold(), Span::raw(" ")];
         for (i, feed) in Feed::ALL.iter().enumerate() {
             let name = format!("{} {}", i + 1, feed.name());
-            title.push(if *feed == self.feed {
+            title.push(if *feed == self.feed && self.search.is_none() {
                 Span::raw(name).bold().underlined()
             } else {
                 Span::raw(name).dim()
             });
             title.push(Span::raw("  "));
         }
+        title.push(match &self.search {
+            Some(query) => Span::raw(format!("s “{}”", safe::printable(query))).bold().underlined(),
+            None => Span::raw("s Search").dim(),
+        });
+        title.push(Span::raw("  "));
         let used: usize = title.iter().map(|s| s.width()).sum();
         // Reading: which section the top of the screen is in.
         let section: Vec<String> = match self.focus {
@@ -984,9 +1044,9 @@ impl App {
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
         let total = self.ids.as_ref().map(|ids| ids.len() - self.gone_in_feed());
         let count = match total {
-            None => format!(" {} ", self.feed.name()),
-            Some(total) if self.filter.is_empty() => format!(" {} ({total}) ", self.feed.name()),
-            Some(total) => format!(" {} ({} of {total}) ", self.feed.name(), self.shown.len()),
+            None => format!(" {} ", self.list_name()),
+            Some(total) if self.filter.is_empty() => format!(" {} ({total}) ", self.list_name()),
+            Some(total) => format!(" {} ({} of {total}) ", self.list_name(), self.shown.len()),
         };
         // The filter shows on the list it narrows, not down in the footer.
         let mut title = vec![Span::raw(count)];
@@ -1021,10 +1081,13 @@ impl App {
         f.render_stateful_widget(list, area, &mut self.list);
 
         let msg = match (&self.ids, &self.feed_error) {
-            (_, Some(e)) => Some(format!("Couldn't load {}: {e}", self.feed.name())),
+            (_, Some(e)) => Some(format!("Couldn't load {}: {e}", self.list_name())),
             (None, None) => Some("Loading…".into()),
             (Some(_), None) if self.shown.is_empty() && !self.filter.is_empty() => {
                 Some("Nothing matches".into())
+            }
+            (Some(_), None) if self.shown.is_empty() && self.search.is_some() => {
+                Some("No stories match".into())
             }
             (Some(_), None) if self.shown.is_empty() => Some("No stories".into()),
             _ => None,
@@ -1048,10 +1111,19 @@ impl App {
         }
     }
 
-    /// Stories in this feed that won't be listed.
+    /// Stories in this list that won't be shown.
     fn gone_in_feed(&self) -> usize {
         let ids = self.ids.as_deref().unwrap_or_default();
-        ids.iter().filter(|id| self.gone.contains(id)).count()
+        ids.iter().filter(|&&id| self.hidden(id)).count()
+    }
+
+    /// Whether a story is left out of the list: it's gone, or muted.
+    fn hidden(&self, id: u64) -> bool {
+        self.gone.contains(&id)
+            || self
+                .stories
+                .get(&id)
+                .is_some_and(|story| muted(story, &self.mute))
     }
 
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
@@ -1129,6 +1201,7 @@ impl App {
                         ("w", "open"),
                         ("/", "filter"),
                         ("1-6", "lists"),
+                        ("s", "search"),
                     ];
                     if !self.filter.is_empty() {
                         keys.push(("esc", "clear filter"));
@@ -1173,6 +1246,31 @@ impl App {
             pos_area,
         );
     }
+}
+
+/// Whether `story` is from a muted site ("example.com", or anything under
+/// it), or has a muted word in its title. Words match whole, ignoring case:
+/// "ai" doesn't mute "Hawaii".
+fn muted(story: &Story, mute: &[String]) -> bool {
+    let domain = story.domain().unwrap_or_default();
+    let title = story.title.to_lowercase();
+    let words: Vec<&str> = title
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .collect();
+    mute.iter().any(|m| {
+        let m = m.trim().to_lowercase();
+        if m.is_empty() {
+            return false;
+        }
+        let site = !m.contains(' ') && m.contains('.');
+        if site {
+            return domain == m || domain.ends_with(&format!(".{m}"));
+        }
+        // A phrase: its words, in order, somewhere in the title.
+        let phrase: Vec<&str> = m.split_whitespace().collect();
+        words.windows(phrase.len()).any(|w| w == phrase.as_slice())
+    })
 }
 
 /// `path` with the home directory shown as `~`.
@@ -1322,6 +1420,7 @@ fn draw_help(f: &mut Frame) {
         ("w W", "Open the story's link / its HN page in the browser"),
         ("y Y", "Copy the story's link / its HN page"),
         ("1-6", "Top, New, Best, Ask, Show, Jobs"),
+        ("s", "Search all of HN's stories"),
         ("r", "Reload"),
         ("t", "Pick a color theme"),
         ("/ n N", "Search; next / previous match"),
@@ -1510,6 +1609,24 @@ mod tests {
         // A word too long for a row breaks mid-word.
         assert_eq!(texts(6)[..3], [" • A", "   rat", "   her"]);
         assert_eq!(texts(22).concat(), " • A rather long title   for a story");
+    }
+
+    #[test]
+    fn mutes_sites_and_words() {
+        let story = |title: &str, url: &str| Story {
+            title: title.into(),
+            url: Some(url.into()),
+            ..Story::default()
+        };
+        let mute = ["medium.com".to_string(), "AI".into(), "web3 wallet".into()];
+        assert!(muted(&story("x", "https://medium.com/a"), &mute));
+        assert!(muted(&story("x", "https://blog.medium.com/a"), &mute));
+        assert!(!muted(&story("x", "https://notmedium.com/a"), &mute));
+        assert!(muted(&story("The AI boom", "https://a.b"), &mute));
+        assert!(muted(&story("Why AI's hype", "https://a.b"), &mute));
+        assert!(!muted(&story("Hawaii", "https://a.b"), &mute));
+        assert!(muted(&story("A Web3 wallet for cats", "https://a.b"), &mute));
+        assert!(!muted(&story("A wallet for web3", "https://a.b"), &mute));
     }
 
     #[test]

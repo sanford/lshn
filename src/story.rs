@@ -327,8 +327,23 @@ pub fn html_to_md(html: &str) -> String {
         }
     }
     finish_link(&mut out, &mut link);
-    // No emphasis left open to run into what follows.
-    out.trim().to_string()
+    quotes(out.trim())
+}
+
+/// HN has no quotes: people start a paragraph with `>` instead. Those go in
+/// italics, so a reply reads as what it answers, then the answer.
+fn quotes(md: &str) -> String {
+    md.split("\n\n")
+        .map(|para| {
+            let quoted = para.starts_with("\\>") && !para.contains('\n');
+            if quoted {
+                format!("_{}_", para.trim_end())
+            } else {
+                para.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn push_text(out: &mut String, link: &mut Option<(String, String)>, text: &str) {
@@ -452,6 +467,16 @@ mod tests {
             html_to_md(html),
             "Look at *this*: [https://x\\.com/a\\_b](<https://x.com/a_b>)\n\n2 \\* 3 \\> 5\n\n```\n  let x = `a`;\n```\n\nafter"
         );
+    }
+
+    #[test]
+    fn quoted_paragraphs_go_in_italics() {
+        assert_eq!(
+            html_to_md("&gt; they said <i>this</i><p>I disagree.<p>&gt;&gt; nested"),
+            "_\\> they said *this*_\n\nI disagree\\.\n\n_\\>\\> nested_"
+        );
+        // Code isn't touched.
+        assert!(html_to_md("<pre><code>&gt; prompt\n</code></pre>").contains("\n> prompt\n"));
     }
 
     #[test]

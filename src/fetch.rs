@@ -23,6 +23,8 @@ const ARTICLE_WORKERS: usize = 6;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Job {
     Feed(Feed),
+    /// Stories matching a search.
+    Search(String),
     Story(u64),
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
@@ -31,6 +33,7 @@ pub enum Job {
 
 pub enum Got {
     Feed(Feed, Result<Vec<u64>, String>),
+    Search(String, Result<Vec<u64>, String>),
     Story(u64, Result<Story, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
@@ -136,6 +139,10 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                 cache.put("feed", &key, ids);
             }
             send(Got::Feed(feed, fresh), true)
+        }
+        Job::Search(query) => {
+            let found = hn::search(&query);
+            send(Got::Search(query, found), true)
         }
         Job::Story(id) => {
             if let Some(story) = cache.get("story", &id.to_string()) {
