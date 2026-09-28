@@ -6,6 +6,7 @@
 //! width = 100             # wrap text at 100 columns (0: the terminal's width)
 //! mouse = false           # leave the mouse to the terminal
 //! outline = true          # show the outline pane beside stories
+//! images = false          # don't show articles' first pictures
 //! feed = "best"           # the list to start with: top, new, best, ask, show or jobs
 //! mute = ["example.com", "crypto"]  # hide stories from these sites, or with these words
 //! ```
@@ -22,6 +23,7 @@ pub struct Config {
     pub width: Option<usize>,
     pub mouse: Option<bool>,
     pub outline: Option<bool>,
+    pub images: Option<bool>,
     pub feed: Option<Feed>,
     pub mute: Vec<String>,
 }

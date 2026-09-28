@@ -6,7 +6,7 @@
 //! line, so a 1-line table that renders as 10 lines, or a paragraph that
 //! wraps to 5, stays in place.
 
-use crate::render::{Heading, RLine, render};
+use crate::render::{Figure, Heading, RLine, render};
 use crate::theme::Theme;
 use crate::wrap;
 use ratatui::Frame;
@@ -51,6 +51,8 @@ pub struct Doc {
     pub site: Option<PathBuf>,
     headings: Vec<Heading>,
     links: Vec<String>,
+    /// Room left for a picture.
+    figure: Option<Figure>,
     search: Option<Search>,
     /// Link hints on screen, while choosing a link to follow.
     pub hints: Vec<Hint>,
@@ -87,6 +89,7 @@ impl Doc {
             site: None,
             headings: Vec::new(),
             links: Vec::new(),
+            figure: None,
             search: None,
             hints: Vec::new(),
             pending_anchor: None,
@@ -161,6 +164,7 @@ impl Doc {
         self.lines = rendered.lines;
         self.headings = rendered.headings;
         self.links = rendered.links;
+        self.figure = rendered.figure;
         self.width = width;
         if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
             self.find(&query);
@@ -320,6 +324,16 @@ impl Doc {
 
     /// The heading of the section at the top of the screen, as an index
     /// into [`Doc::headings`].
+    /// The room left for a picture, as drawn last: the area the document
+    /// was drawn in, the picture's size, and the row it starts on, which is
+    /// above the area once it's scrolled partly off the top.
+    pub fn figure(&self) -> Option<(Rect, Figure, i32)> {
+        let figure = self.figure?;
+        let y = figure.line as i32 - self.top as i32;
+        let visible = y < self.height as i32 && y + figure.rows as i32 > 0;
+        visible.then_some((self.rendered_area, figure, y))
+    }
+
     pub fn current_heading(&self) -> Option<usize> {
         self.headings.iter().rposition(|h| h.line <= self.top)
     }

@@ -45,7 +45,7 @@ Reading:
 | `/` `n` `N` | Search the story; next and previous match |
 | `f` | Follow a link: type the letters drawn on it |
 | `Esc` `←` `h` | Back to where you followed a link from, then to the list. `←` never quits, however many times you press it |
-| `⇧↓` `⇧↑` (or `>` `<`) | Next and previous story: what `↓` and `↑` do in the list |
+| `Ctrl-J` `Ctrl-K` (or `Ctrl-↓` `Ctrl-↑`, `⇧↓` `⇧↑`, `>` `<`) | Next and previous story: what `↓` and `↑` do in the list |
 | `\` | Keep the list on screen while reading |
 
 Anywhere:
@@ -54,7 +54,10 @@ Anywhere:
 |---|---|
 | `w` `W` | Open the story's link, or its HN page, in the browser |
 | `y` `Y` | Copy the story's link, or its HN page |
-| `r` | Reload |
+| `v` | Upvote: in the list, the selected story; reading, label the story and the comments on screen and type one's letters |
+| `r` | Reply, choosing what to the same way: write it in your editor, see it, then post it |
+| `L` | Log in to HN, or out |
+| `R` | Reload |
 | `t` | Pick a color theme |
 | `?` | All of the above |
 
@@ -63,6 +66,12 @@ Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl
 ### Following links
 
 Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes.
+
+### Voting and replying
+
+`v` and `r` act as you on HN, so the first time, `L` (or `v` or `r` themselves) asks you to log in. lshn keeps HN's session, never your password: in the system's keyring (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux) or, where there isn't one, in `~/.lshn/session`, encrypted with a passphrase you choose, and asked for once a run.
+
+Reading, `v` and `r` label the story and each comment on screen (by its age, which links to it, as on HN) for you to choose one. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
 ### What it remembers
 
@@ -76,6 +85,8 @@ Story lists and stories come from HN's [official API](https://github.com/HackerN
 
 Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer.
 
+An article's first picture is shown at the top of it, in the preview and read in full. Terminals that can draw pictures (iTerm2, Kitty, WezTerm, Ghostty, and those with Sixel) show the picture itself; others, and tmux, get a rougher version drawn in colored half blocks. `images = false` turns them off.
+
 Everything a story or comment says is treated as text: none of it can become formatting, or reach the terminal as a control sequence.
 
 ### Settings
@@ -88,6 +99,7 @@ width = 100             # wrap text at 100 columns
 feed = "best"           # the list to start with
 mouse = false           # leave the mouse to the terminal
 outline = true          # show the outline beside stories
+images = false          # don't show articles' first pictures
 mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
                                   # or with these words or phrases in their titles
 ```

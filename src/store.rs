@@ -96,6 +96,17 @@ impl Cache {
         }
     }
 
+    /// Kept as they came, rather than as JSON: pictures.
+    pub fn get_bytes(&self, kind: &str, key: &str) -> Option<Vec<u8>> {
+        std::fs::read(self.dir.as_ref()?.join(kind).join(key)).ok()
+    }
+
+    pub fn put_bytes(&self, kind: &str, key: &str, bytes: &[u8]) {
+        if let Some(dir) = &self.dir {
+            write(&dir.join(kind).join(key), bytes);
+        }
+    }
+
     /// Deletes what's older than a week, in the background.
     pub fn prune(&self) {
         let Some(dir) = self.dir.clone() else { return };

@@ -23,14 +23,37 @@ pub enum Prompt {
         from: usize,
         forward: bool,
     },
-    /// Choosing a link by its hint letters.
-    Hints { typed: String },
+    /// Choosing a link by its hint letters, to follow it, or to upvote or
+    /// reply to the story or comment it's to.
+    Hints { typed: String, purpose: Purpose },
     /// The outline or the themes.
     Pick(Picker),
     /// Typing a search of all of HN's stories.
     SearchHn { query: String },
+    /// Logging in: the username, then the password.
+    LoginUser { user: String },
+    LoginPassword { user: String, password: String },
+    /// The passphrase for the login's file, where there's no keyring.
+    Passphrase {
+        text: String,
+        purpose: super::act::Passphrase,
+    },
+    Logout { user: String },
+    /// A reply, written, to post or not.
+    Post {
+        draft: super::act::Draft,
+        text: String,
+    },
     /// Confirming opening something outside lshn.
     Open(crate::open::Target),
+}
+
+/// What choosing a hinted link does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    Follow,
+    Upvote,
+    Reply,
 }
 
 /// A page to go back to, and the line that was at the top of the screen.
@@ -74,7 +97,7 @@ impl App {
             // The outline pane, just while choosing: the document follows
             // the selection, and the pane goes away after.
             KeyCode::Char('o') => self.focus_outline(true),
-            KeyCode::Char('f') => self.show_hints(),
+            KeyCode::Char('f') => self.show_hints(Purpose::Follow),
             KeyCode::Esc if doc.search_status().is_some() => doc.clear_search(),
             _ => return false,
         }
@@ -149,7 +172,7 @@ impl App {
                     forward,
                 });
             }
-            Prompt::Hints { mut typed } => {
+            Prompt::Hints { mut typed, purpose } => {
                 let KeyCode::Char(c) = key.code else {
                     {
                         self.clear_hints();
@@ -168,9 +191,14 @@ impl App {
                 let partial = doc.hints.iter().any(|h| h.label.starts_with(&typed));
                 if let Some(url) = url {
                     self.clear_hints();
-                    self.follow(&url);
+                    match (purpose, hn::link(&url)) {
+                        (Purpose::Follow, _) => self.follow(&url),
+                        (Purpose::Upvote, Some(Link::Item(id))) => self.upvote(id),
+                        (Purpose::Reply, Some(Link::Item(id))) => self.reply(id),
+                        _ => {}
+                    }
                 } else if partial {
-                    self.prompt = Some(Prompt::Hints { typed });
+                    self.prompt = Some(Prompt::Hints { typed, purpose });
                 } else {
                     self.clear_hints();
                 }
@@ -195,6 +223,11 @@ impl App {
                 }
                 _ => self.prompt = Some(Prompt::SearchHn { query }),
             },
+            p @ (Prompt::LoginUser { .. }
+            | Prompt::LoginPassword { .. }
+            | Prompt::Passphrase { .. }
+            | Prompt::Logout { .. }
+            | Prompt::Post { .. }) => self.act_prompt_key(p, key, ctrl),
             Prompt::Open(target) => {
                 if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
                     self.flash = Some(match crate::open::open(&target) {
@@ -207,12 +240,20 @@ impl App {
         false
     }
 
-    /// Labels the links on screen so one can be followed by typing.
-    fn show_hints(&mut self) {
+    /// Labels the links on screen so one can be chosen by typing: any
+    /// link to follow, or to upvote or reply, the links to the story and
+    /// its comments (their ages).
+    pub(super) fn show_hints(&mut self, purpose: Purpose) {
         let Some(doc) = self.current() else { return };
-        let links = doc.visible_links();
+        let mut links = doc.visible_links();
+        if purpose != Purpose::Follow {
+            links.retain(|(_, _, url)| matches!(hn::link(url), Some(Link::Item(_))));
+        }
         if links.is_empty() {
-            self.flash = Some("No links on screen".into());
+            self.flash = Some(match purpose {
+                Purpose::Follow => "No links on screen".into(),
+                _ => "No story or comments on screen".into(),
+            });
             return;
         }
         let labels = hint_labels(links.len());
@@ -224,6 +265,7 @@ impl App {
         doc.set_hints(hints);
         self.prompt = Some(Prompt::Hints {
             typed: String::new(),
+            purpose,
         });
     }
 
@@ -326,8 +368,7 @@ impl App {
         self.user_page = Some(name.clone());
         self.user_doc(&name).jump_to(0);
         // Fetched afresh each time: it's who they are now that's wanted.
-        self.waiting += 1;
-        self.fetcher.push(Job::User(name), true);
+        self.send(Job::User(name), true);
     }
 
     /// Someone's page as a document, made the first time it's needed.
@@ -379,6 +420,9 @@ impl App {
 
     /// The footer while a prompt is up.
     pub(super) fn prompt_footer(&mut self) -> Option<Line<'static>> {
+        if let Some(line) = self.act_footer() {
+            return Some(line);
+        }
         let line = match self.prompt.as_ref()? {
             Prompt::Search { query, .. } => {
                 let query = query.clone();
@@ -393,12 +437,22 @@ impl App {
                     Span::raw(format!("  {status}")).dim(),
                 ])
             }
-            Prompt::Hints { typed } => Line::from(vec![
-                " Follow link: ".bold(),
+            Prompt::Hints { typed, purpose } => Line::from(vec![
+                match purpose {
+                    Purpose::Follow => " Follow link: ".bold(),
+                    Purpose::Upvote => " Upvote (a comment's age, or the story's comments link): ".bold(),
+                    Purpose::Reply => " Reply to (a comment's age, or the story's comments link): ".bold(),
+                },
                 Span::raw(format!("type its letters {typed}")),
                 "  esc cancels".dim(),
             ]),
             Prompt::Pick(_) => Line::from(" ↑↓ move  / filter  ⏎ go  esc close  q quit".dim()),
+            // Their footers are act_footer's.
+            Prompt::LoginUser { .. }
+            | Prompt::LoginPassword { .. }
+            | Prompt::Passphrase { .. }
+            | Prompt::Logout { .. }
+            | Prompt::Post { .. } => return None,
             Prompt::SearchHn { query } => Line::from(vec![
                 " Search HN: ".bold(),
                 Span::raw(query.clone()),

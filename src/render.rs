@@ -27,6 +27,18 @@ pub struct Rendered {
     pub headings: Vec<Heading>,
     /// Link targets, as written.
     pub links: Vec<String>,
+    /// Room left for a picture, if the document has one.
+    pub figure: Option<Figure>,
+}
+
+/// Where a picture goes: the line it starts on, its size in cells, and
+/// the width of the text it's centred over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Figure {
+    pub line: usize,
+    pub width: usize,
+    pub cols: usize,
+    pub rows: usize,
 }
 
 pub struct Heading {
@@ -93,6 +105,7 @@ pub fn render(
         inline_depth: std::cell::Cell::new(0),
         headings: Vec::new(),
         anchors: Anchorizer::new(),
+        figure: None,
     };
     for child in root.children() {
         let pos = child.data().sourcepos;
@@ -103,6 +116,7 @@ pub fn render(
         lines: r.out,
         headings: r.headings,
         links: r.links.into_inner(),
+        figure: r.figure,
     }
 }
 
@@ -135,6 +149,7 @@ struct Renderer<'t> {
     links: RefCell<Vec<String>>,
     headings: Vec<Heading>,
     anchors: Anchorizer,
+    figure: Option<Figure>,
 }
 
 impl Renderer<'_> {
@@ -452,11 +467,47 @@ impl Renderer<'_> {
     }
 
     fn html_block(&mut self, literal: &str) {
+        if let Some(label) = rule_label(literal) {
+            self.labelled_rule(&label);
+            return;
+        }
+        if let Some((w, h, rows)) = crate::figure::parse_marker(literal) {
+            // Blank lines for it to be drawn over.
+            let (cols, rows) = crate::figure::cells(w, h, self.avail(), rows);
+            self.flush_gap();
+            self.figure.get_or_insert(Figure {
+                line: self.out.len(),
+                width: self.avail(),
+                cols,
+                rows,
+            });
+            for _ in 0..rows {
+                self.emit(Vec::new());
+            }
+            self.gap();
+            return;
+        }
         let pieces = crate::html::block(literal, self.theme);
         if !pieces.is_empty() {
             self.para(&pieces);
             self.gap();
         }
+    }
+
+    /// `──── label ────`, dim and centred; a plain rule if the label won't
+    /// fit with a few dashes either side.
+    fn labelled_rule(&mut self, label: &str) {
+        let avail = self.avail();
+        let label = format!(" {} ", crate::safe::printable(label));
+        let w = wrap::width(&label);
+        let rule = if w + 8 <= avail {
+            let left = (avail - w) / 2;
+            format!("{}{label}{}", "─".repeat(left), "─".repeat(avail - w - left))
+        } else {
+            "─".repeat(avail)
+        };
+        self.emit(vec![Span::styled(rule, self.theme.dim())]);
+        self.gap();
     }
 
     /// YAML front matter as dimmed `key: value` lines.
@@ -836,6 +887,13 @@ fn trim_end(spans: &mut Vec<Span<'static>>) {
     }
 }
 
+/// The label of a rule written as `<!-- rule: label -->`: Markdown's
+/// `---` can't carry one.
+pub fn rule_label(html: &str) -> Option<String> {
+    let label = html.trim().strip_prefix("<!-- rule:")?.strip_suffix("-->")?;
+    Some(label.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -846,6 +904,15 @@ mod tests {
             .iter()
             .map(|l| l.text() + "\n")
             .collect()
+    }
+
+    #[test]
+    fn rules_can_carry_a_centred_label() {
+        assert_eq!(plain("<!-- rule: hi -->", 12), "──── hi ────\n");
+        // Too narrow for dashes either side: a plain rule.
+        assert_eq!(plain("<!-- rule: a long label -->", 12), "────────────\n");
+        // Other comments are left alone.
+        assert_eq!(rule_label("<!-- rules -->"), None);
     }
 
     #[test]

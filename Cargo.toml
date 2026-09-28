@@ -26,6 +26,15 @@ toml = "1.1.6"
 omarchy-themes = "=0.1.0"
 ureq = { version = "3.4.2", features = ["json"] }
 dom_smoothie = "0.18.2"
+# The system's store for secrets: Keychain, Credential Manager, Secret Service.
+keyring = "4.2.0"
+# Where there's no keyring: the session, encrypted with a passphrase.
+argon2 = "0.6.0"
+chacha20poly1305 = { version = "0.11.0", features = ["getrandom"] }
+getrandom = "0.4.3"
+ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+base64 = "0.22"
 
 [dev-dependencies]
 insta = "1.48.0"

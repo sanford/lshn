@@ -1,9 +1,12 @@
 mod ansi;
 mod article;
+mod auth;
 mod clipboard;
 mod config;
 mod doc;
+mod editor;
 mod fetch;
+mod figure;
 mod highlight;
 mod hn;
 mod html;
@@ -12,6 +15,7 @@ mod open;
 mod palettes;
 mod render;
 mod safe;
+mod session;
 mod store;
 mod story;
 mod theme;
@@ -120,6 +124,7 @@ fn run(args: Args) -> io::Result<()> {
         max_width: width,
         mouse: !args.no_mouse && config.mouse.unwrap_or(true),
         outline: config.outline.unwrap_or(false),
+        images: config.images.unwrap_or(true),
         choice,
         omarchy: palette.is_some(),
         feed,
@@ -168,7 +173,7 @@ fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let md = story::markdown(&story, article.as_ref(), comments, false, now, None);
+    let md = story::markdown(&story, article.as_ref(), comments, false, now, None, None);
     let mut lines = render::render(&md, width, theme, None, None).lines;
     for span in lines.iter_mut().flat_map(|l| &mut l.spans) {
         span.style = theme.recolor(span.style);

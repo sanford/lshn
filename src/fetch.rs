@@ -10,8 +10,11 @@
 //! isn't fetched again.
 
 use crate::article::{self, Article};
+use crate::auth::{self, Form, Session};
 use crate::hn::{self, Comment, Feed, Story, User};
+use crate::figure;
 use crate::store::Cache;
+use image::DynamicImage;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -20,7 +23,8 @@ use std::sync::{Arc, Condvar, Mutex};
 const HN_WORKERS: usize = 8;
 const ARTICLE_WORKERS: usize = 6;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Not `Debug`: some carry a password or a session.
+#[derive(Clone, PartialEq, Eq)]
 pub enum Job {
     Feed(Feed),
     /// Stories matching a search.
@@ -29,8 +33,17 @@ pub enum Job {
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
     Article(u64, String),
+    /// A story's article's first picture.
+    Figure(u64, String),
     /// Someone's profile and latest posts.
     User(String),
+    /// Logging in: a username and password.
+    Login(String, String),
+    Upvote(Session, u64),
+    /// The form for replying to an item, and whether it's a story.
+    ReplyForm(Session, u64, bool),
+    /// Posting a reply: the form, the text, and the story it's on.
+    Post(Session, Form, String, u64),
 }
 
 pub enum Got {
@@ -39,7 +52,13 @@ pub enum Got {
     Story(u64, Result<Story, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
+    Figure(u64, Result<DynamicImage, String>),
     User(String, Result<User, String>),
+    LoggedIn(Result<Session, String>),
+    Upvoted(Result<(), String>),
+    ReplyForm(u64, Result<Form, String>),
+    /// A reply posted, or not, to the story with this id.
+    Posted(u64, Result<(), String>),
 }
 
 /// Something back from the fetcher.
@@ -48,6 +67,73 @@ pub struct Done {
     /// This finishes the job. Otherwise it's from the cache, and the
     /// fetched copy is on its way.
     pub last: bool,
+}
+
+/// What a job fetches, for saying what's still coming.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    List,
+    Story,
+    Comments,
+    Article,
+    /// Someone's page, or something done as you.
+    Other,
+}
+
+impl Job {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Job::Feed(_) | Job::Search(_) => Kind::List,
+            Job::Story(_) => Kind::Story,
+            Job::Thread(..) => Kind::Comments,
+            Job::Article(..) => Kind::Article,
+            _ => Kind::Other,
+        }
+    }
+}
+
+impl Got {
+    pub fn kind(&self) -> Kind {
+        match self {
+            Got::Feed(..) | Got::Search(..) => Kind::List,
+            Got::Story(..) => Kind::Story,
+            Got::Thread(..) => Kind::Comments,
+            Got::Article(..) => Kind::Article,
+            _ => Kind::Other,
+        }
+    }
+}
+
+/// How many jobs of each kind are under way.
+#[derive(Default)]
+pub struct Waiting([usize; 5]);
+
+impl Waiting {
+    fn slot(kind: Kind) -> usize {
+        kind as usize
+    }
+
+    pub fn start(&mut self, kind: Kind) {
+        self.0[Self::slot(kind)] += 1;
+    }
+
+    pub fn finish(&mut self, kind: Kind) {
+        let n = &mut self.0[Self::slot(kind)];
+        *n = n.saturating_sub(1);
+    }
+
+    pub fn any(&self) -> bool {
+        self.0.iter().any(|&n| n > 0)
+    }
+}
+
+/// A spinner's frame, turning every 80ms.
+pub fn spinner() -> char {
+    const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    let ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    FRAMES[(ms / 80 % FRAMES.len() as u128) as usize]
 }
 
 type Queue = Arc<(Mutex<VecDeque<Job>>, Condvar)>;
@@ -80,7 +166,7 @@ impl Fetcher {
 
     fn queue(&self, job: &Job) -> &Queue {
         match job {
-            Job::Article(..) => &self.articles,
+            Job::Article(..) | Job::Figure(..) => &self.articles,
             _ => &self.hn,
         }
     }
@@ -167,6 +253,14 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             }
             send(Got::Thread(id, fresh), true)
         }
+        Job::Login(user, password) => send(Got::LoggedIn(auth::login(&user, &password)), true),
+        Job::Upvote(session, id) => send(Got::Upvoted(auth::upvote(&session, id)), true),
+        Job::ReplyForm(session, id, is_story) => {
+            send(Got::ReplyForm(id, auth::reply_form(&session, id, is_story)), true)
+        }
+        Job::Post(session, form, text, story) => {
+            send(Got::Posted(story, auth::post(&session, &form, &text)), true)
+        }
         Job::User(name) => {
             if let Some(user) = cache.get("user", &name) {
                 send(Got::User(name.clone(), Ok(user)), false)?;
@@ -176,6 +270,18 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                 cache.put("user", &name, user);
             }
             send(Got::User(name, fresh), true)
+        }
+        Job::Figure(id, url) => {
+            let key = id.to_string();
+            let picture = match cache.get_bytes("figure", &key) {
+                Some(bytes) => figure::decode(&bytes),
+                None => figure::download(&url).and_then(|bytes| {
+                    let picture = figure::decode(&bytes)?;
+                    cache.put_bytes("figure", &key, &bytes);
+                    Ok(picture)
+                }),
+            };
+            send(Got::Figure(id, picture), true)
         }
         Job::Article(id, url) => {
             if let Some(article) = cache.get("article", &id.to_string()) {

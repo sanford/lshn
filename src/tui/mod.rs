@@ -1,6 +1,7 @@
 //! The interactive reader: stories on the left, the selected one on the
 //! right (title, article, then comments), and the story full screen.
 
+mod act;
 mod mouse;
 mod nav;
 mod outline;
@@ -9,13 +10,14 @@ mod themes;
 
 use crate::article::Article;
 use crate::doc::Doc;
-use crate::fetch::{Done, Fetcher, Got, Job};
+use crate::fetch::{self, Done, Fetcher, Got, Job, Waiting};
 use crate::hn::{Comment, Feed, Story, User};
 use crate::omarchy::Follow;
 use crate::store::{self, Cache, Seen, SeenStore};
 use crate::story::{self, Comments};
 use crate::theme::{Choice, Mode, Theme};
 use crate::{clipboard, safe, wrap};
+use image::DynamicImage;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -24,10 +26,11 @@ use ratatui::style::{Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
+use ratatui_image::picker::Picker;
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::rc::Rc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Stories fetched ahead of the selection, so the list fills in before
 /// it's scrolled to.
@@ -40,6 +43,8 @@ const PREFETCH_AHEAD: usize = 5;
 /// the story: the story beside it still gets about 75 columns of text, a
 /// better line length for reading than the whole width.
 const WIDE: u16 = 130;
+/// How long the picture waits for scrolling to stop before it's drawn.
+const FIGURE_SETTLE: Duration = Duration::from_millis(150);
 
 /// How stories are shown.
 pub struct Settings {
@@ -50,6 +55,8 @@ pub struct Settings {
     pub mouse: bool,
     /// Open stories with the outline pane beside them.
     pub outline: bool,
+    /// Show articles' first pictures.
+    pub images: bool,
     /// The theme asked for, by flag or config.
     pub choice: Choice,
     /// Colors come from Omarchy's theme, and follow it.
@@ -84,6 +91,13 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     app.mute = settings.mute;
     app.open_feed(settings.feed);
     let mut terminal = ratatui::init();
+    if settings.images {
+        app.picker = picker();
+        if let Some(picker) = &app.picker {
+            let cell = picker.font_size();
+            crate::figure::set_cell(cell.width, cell.height);
+        }
+    }
     set_mouse(app.mouse_on, true);
     if app.mouse_on {
         // ratatui's panic hook restores the terminal, but doesn't know
@@ -98,6 +112,30 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     set_mouse(app.mouse_on, false);
     ratatui::restore();
     result
+}
+
+/// How the terminal can draw pictures, and its cell size in pixels. Asked
+/// after the screen's ours and before reading keys, and briefly: a terminal
+/// that doesn't answer holds up the start, and whatever's typed meanwhile is
+/// lost. tmux passes on neither the question nor pictures, unless set up
+/// to, so there it's half blocks without asking.
+fn picker() -> Option<Picker> {
+    use ratatui_image::picker::cap_parser::QueryStdioOptions;
+    if std::env::var_os("TMUX").is_some() {
+        return Some(Picker::halfblocks());
+    }
+    let mut picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
+        timeout: Duration::from_millis(250),
+        ..QueryStdioOptions::default()
+    })
+    .ok()?;
+    // iTerm2 says it can do Sixel too, and that's what gets picked, but
+    // its own pictures are what it draws best.
+    let iterm = |var| std::env::var(var).is_ok_and(|v| v.contains("iTerm"));
+    if iterm("TERM_PROGRAM") || iterm("LC_TERMINAL") {
+        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+    }
+    Some(picker)
 }
 
 /// Turns mouse reporting on or off, if lshn uses the mouse.
@@ -126,6 +164,7 @@ enum Asked {
     Story(u64),
     Thread(u64),
     Article(u64),
+    Figure(u64),
 }
 
 /// A story that passes the filter, with the positions of the matched
@@ -153,7 +192,7 @@ struct App {
     fetcher: Fetcher,
     asked: HashSet<Asked>,
     /// Jobs asked for and not yet back.
-    waiting: usize,
+    waiting: Waiting,
     feed: Feed,
     /// A search of HN, whose results are the list instead of the feed's.
     search: Option<String>,
@@ -167,6 +206,17 @@ struct App {
     mute: Vec<String>,
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
+    /// Articles' first pictures, by story.
+    figures: HashMap<u64, DynamicImage>,
+    /// How the terminal draws pictures, once asked; `None` if it isn't to.
+    picker: Option<Picker>,
+    /// The picture last drawn, ready at its size: story, columns, rows.
+    drawn: Option<((u64, usize, usize), crate::figure::Drawn)>,
+    /// Where the picture was last put (story, row), and when it moved.
+    figure_at: Option<(u64, i32)>,
+    figure_moved: Option<Instant>,
+    /// Moving fast: the picture waits till it stops.
+    figure_hidden: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
     user_docs: HashMap<String, Doc>,
@@ -176,6 +226,16 @@ struct App {
     history: Vec<nav::Back>,
     /// A story an HN link was followed to, to open once it's loaded.
     opening: Option<u64>,
+    /// Whether you're logged in to HN.
+    auth: act::Auth,
+    /// What's waiting for you to log in.
+    pending: Option<act::Action>,
+    /// A reply form asked for: what's being replied to, and the story.
+    replying: Option<(u64, Option<u64>)>,
+    /// A reply to write in the editor, once the key's handled.
+    editing: Option<act::Draft>,
+    /// The draft of a reply being posted, to delete once it is.
+    posting: Option<std::path::PathBuf>,
     /// The stories you've read, and how much of each thread you'd seen.
     seen: SeenStore,
     /// For the story being read: the newest comment seen before it was
@@ -241,7 +301,7 @@ impl App {
             max_width,
             fetcher,
             asked: HashSet::new(),
-            waiting: 0,
+            waiting: Waiting::default(),
             feed: Feed::Top,
             search: None,
             ids: None,
@@ -251,12 +311,23 @@ impl App {
             mute: Vec::new(),
             threads: HashMap::new(),
             articles: HashMap::new(),
+            figures: HashMap::new(),
+            picker: None,
+            drawn: None,
+            figure_at: None,
+            figure_moved: None,
+            figure_hidden: false,
             docs: HashMap::new(),
             users: HashMap::new(),
             user_docs: HashMap::new(),
             user_page: None,
             history: Vec::new(),
             opening: None,
+            auth: act::Auth::Unknown,
+            pending: None,
+            replying: None,
+            editing: None,
+            posting: None,
             seen,
             marks: HashMap::new(),
             filter: String::new(),
@@ -290,13 +361,21 @@ impl App {
     fn run(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         loop {
             self.receive();
+            if let Some(draft) = self.editing.take() {
+                self.edit_reply(terminal, draft)?;
+            }
             self.restyle();
             self.preview_theme();
             self.prefetch();
+            // All at once: without it, a terminal can show a frame half
+            // drawn, which shows most while pictures scroll.
+            use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+            ratatui::crossterm::queue!(io::stdout(), BeginSynchronizedUpdate)?;
             terminal.draw(|f| self.draw(f))?;
+            ratatui::crossterm::execute!(io::stdout(), EndSynchronizedUpdate)?;
             // While fetching, wake up often to show what's come; otherwise
             // now and then, to keep the ages current.
-            let wait = if self.waiting > 0 {
+            let wait = if self.waiting.any() || self.figure_hidden {
                 Duration::from_millis(30)
             } else {
                 Duration::from_secs(1)
@@ -304,26 +383,36 @@ impl App {
             if !event::poll(wait)? {
                 continue;
             }
-            let key = match event::read()? {
-                Event::Key(key) => key,
-                Event::Mouse(m) => {
-                    self.flash = None;
-                    self.mouse(m);
-                    continue;
+            // Everything that's waiting, then one frame: a key held down
+            // doesn't queue up frames to catch up on.
+            loop {
+                match event::read()? {
+                    Event::Key(key) if key.kind == KeyEventKind::Press && self.key(key) => {
+                        return Ok(());
+                    }
+                    Event::Mouse(m) => {
+                        self.flash = None;
+                        self.mouse(m);
+                    }
+                    _ => {} // Resizes redraw at the top of the loop.
                 }
-                _ => continue, // Resizes redraw at the top of the loop.
-            };
-            if key.kind == KeyEventKind::Press && self.key(key) {
-                return Ok(());
+                if self.editing.is_some() || !event::poll(Duration::ZERO)? {
+                    break;
+                }
             }
         }
+    }
+
+    /// Hands the fetcher a job, counting it until it's done.
+    fn send(&mut self, job: Job, urgent: bool) {
+        self.waiting.start(job.kind());
+        self.fetcher.push(job, urgent);
     }
 
     /// Asks the fetcher for something, unless it's been asked already.
     fn ask(&mut self, what: Asked, job: Job, urgent: bool) {
         if self.asked.insert(what) {
-            self.waiting += 1;
-            self.fetcher.push(job, urgent);
+            self.send(job, urgent);
         } else if urgent {
             // Maybe still waiting behind prefetches: move it up.
             self.fetcher.hurry(&job);
@@ -352,8 +441,7 @@ impl App {
         self.filter.clear();
         self.typing = false;
         self.focus = Focus::List;
-        self.waiting += 1;
-        self.fetcher.push(Job::Search(query), true);
+        self.send(Job::Search(query), true);
         self.refresh();
         self.list.select(None);
         *self.list.offset_mut() = 0;
@@ -373,10 +461,7 @@ impl App {
         self.asked.retain(|a| matches!(a, Asked::Article(_)));
         self.gone.clear();
         match self.search.clone() {
-            Some(query) => {
-                self.waiting += 1;
-                self.fetcher.push(Job::Search(query), true);
-            }
+            Some(query) => self.send(Job::Search(query), true),
             None => {
                 let feed = self.feed;
                 self.ask(Asked::Feed(feed), Job::Feed(feed), true);
@@ -392,7 +477,7 @@ impl App {
         let mut list_changed = false;
         while let Ok(Done { got, last }) = self.fetcher.done.try_recv() {
             if last {
-                self.waiting = self.waiting.saturating_sub(1);
+                self.waiting.finish(got.kind());
             }
             match got {
                 Got::Feed(feed, result) if feed == self.feed && self.search.is_none() => {
@@ -463,10 +548,25 @@ impl App {
                         doc.replace(md);
                     }
                 }
+                Got::LoggedIn(result) => self.logged_in(result),
+                Got::Upvoted(result) => self.upvoted(result),
+                Got::ReplyForm(id, result) => self.got_reply_form(id, result),
+                Got::Posted(story, result) => self.posted(story, result),
                 Got::Article(id, article) => {
+                    if let (Some(_), Article::Text { md, .. }) = (&self.picker, &article)
+                        && let Some((url, _)) = crate::figure::first(md)
+                    {
+                        let urgent = self.current_key().is_some_and(|(on, _)| on == id);
+                        self.ask(Asked::Figure(id), Job::Figure(id, url), urgent);
+                    }
                     self.articles.insert(id, article);
                     self.rebuild(id);
                 }
+                Got::Figure(id, Ok(picture)) => {
+                    self.figures.insert(id, picture);
+                    self.rebuild(id);
+                }
+                Got::Figure(_, Err(_)) => {}
             }
         }
         if list_changed {
@@ -571,7 +671,8 @@ impl App {
             Some(&marked) => marked,
             None => self.seen.stories.get(&id).map(|s| s.newest),
         };
-        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen)
+        let picture = self.figures.get(&id);
+        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen, picture)
     }
 
     /// Brings a story's documents up to date with what's been fetched.
@@ -859,7 +960,10 @@ impl App {
             KeyCode::Char('W') => self.open_in_browser(true),
             KeyCode::Char('y') if !ctrl => self.copy_link(false),
             KeyCode::Char('Y') => self.copy_link(true),
-            KeyCode::Char('r') if !ctrl => self.reload(),
+            KeyCode::Char('R') => self.reload(),
+            KeyCode::Char('r') if !ctrl => self.reply_key(),
+            KeyCode::Char('v') if !ctrl => self.upvote_key(),
+            KeyCode::Char('L') => self.login_key(),
             KeyCode::Char('O') if self.focus == Focus::Reader => self.focus_outline(false),
             KeyCode::Char('O') => self.outline_pane = !self.outline_pane,
             KeyCode::Char('t') if !ctrl => self.open_themes(),
@@ -1000,11 +1104,20 @@ impl App {
                 return false;
             }
             // What ↑ and ↓ do in the list: the next and previous story.
-            KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            // ⌃J ⌃K keep your hands on the home row.
+            KeyCode::Down if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
                 self.next_story(1);
                 return false;
             }
-            KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            KeyCode::Up if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
+                self.next_story(-1);
+                return false;
+            }
+            KeyCode::Char('j') if ctrl => {
+                self.next_story(1);
+                return false;
+            }
+            KeyCode::Char('k') if ctrl => {
                 self.next_story(-1);
                 return false;
             }
@@ -1081,6 +1194,7 @@ impl App {
         self.draw_header(f, header);
         self.draw_footer(f, footer);
         self.draw_picker(f);
+        self.draw_post(f);
         if self.help {
             draw_help(f);
         }
@@ -1115,11 +1229,46 @@ impl App {
         // The story's title is already on screen; the trail is what's under it.
         let section = section.get(1..).unwrap_or_default();
         let room = usize::from(area.width).saturating_sub(used + 3);
+        // Full screen, what's still coming for the story goes at the right.
+        let reader_only = self.focus == Focus::Reader && !self.list_in_reader;
+        let coming = self.coming().filter(|_| reader_only).unwrap_or_default();
+        let coming_w = wrap::width(&coming);
+        let room = room.saturating_sub(coming_w + usize::from(coming_w > 0) * 2);
         if let Some(trail) = section_trail(section, room) {
             title.push(Span::raw("§ ").dim());
             title.push(Span::raw(trail));
         }
-        f.render_widget(Paragraph::new(Line::from(title)), area);
+        let [title_area, coming_area] =
+            Layout::horizontal([Constraint::Min(0), Constraint::Length(coming_w as u16 + 1)])
+                .areas(area);
+        f.render_widget(Paragraph::new(Line::from(title)), title_area);
+        f.render_widget(Paragraph::new(Line::from(coming).dim()), coming_area);
+    }
+
+    /// What's still coming for the story (or page) on screen: "⠹ comments
+    /// · article". `None` once it's all there.
+    fn coming(&self) -> Option<String> {
+        let reader = self.focus == Focus::Reader || self.kept();
+        let mut parts = Vec::new();
+        if let (true, Some(name)) = (reader, &self.user_page) {
+            if !self.users.contains_key(name) {
+                parts.push("their page");
+            }
+        } else {
+            let (id, _) = self.current_key()?;
+            match self.stories.get(&id) {
+                None => parts.push("story"),
+                Some(story) => {
+                    if !self.threads.contains_key(&id) {
+                        parts.push("comments");
+                    }
+                    if story.url.is_some() && !self.articles.contains_key(&id) {
+                        parts.push("article");
+                    }
+                }
+            }
+        }
+        (!parts.is_empty()).then(|| format!("{} {}", fetch::spinner(), parts.join(" · ")))
     }
 
     fn pane(&self, title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
@@ -1216,10 +1365,56 @@ impl App {
                 .is_some_and(|story| muted(story, &self.mute))
     }
 
+    /// The story's picture, over the room its document left for it.
+    fn draw_figure(&mut self, f: &mut Frame) {
+        let user_page = (self.focus == Focus::Reader || self.kept()) && self.user_page.is_some();
+        let on_screen = self
+            .current_key()
+            .filter(|_| !user_page && self.picker.is_some())
+            .filter(|(id, _)| self.figures.contains_key(id))
+            .and_then(|(id, _)| Some((id, self.current()?.figure()?)));
+        let Some((id, (area, figure, y))) = on_screen else {
+            // Nothing to wait for.
+            self.figure_hidden = false;
+            return;
+        };
+        let (Some(picker), Some(picture)) = (&self.picker, self.figures.get(&id)) else {
+            return;
+        };
+        // A picture is sent again whenever it moves, which is a lot for a
+        // terminal to keep up with at a key's repeat rate: moving again
+        // soon after the last move, it's hidden till things settle.
+        let now = Instant::now();
+        let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
+        if self.figure_at != Some((id, y)) {
+            self.figure_hidden = !settled;
+            self.figure_at = Some((id, y));
+            self.figure_moved = Some(now);
+        } else if settled {
+            self.figure_hidden = false;
+        }
+        if self.figure_hidden {
+            return;
+        }
+        let key = (id, figure.cols, figure.rows);
+        if self.drawn.as_ref().is_none_or(|(k, _)| *k != key) {
+            self.drawn = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
+                .map(|d| (key, d));
+        }
+        if let Some((_, drawn)) = &self.drawn {
+            // Centred over the text.
+            let x = figure.width.saturating_sub(figure.cols) / 2;
+            drawn.draw(f.buffer_mut(), area, x as u16, y);
+        }
+    }
+
     fn draw_preview(&mut self, f: &mut Frame, area: Rect) {
-        let block = self
+        let mut block = self
             .pane("", self.focus == Focus::Reader)
             .padding(Padding::horizontal(1));
+        if let Some(coming) = self.coming() {
+            block = block.title_top(Line::from(format!(" {coming} ")).dim().right_aligned());
+        }
         let inner = block.inner(area);
         f.render_widget(block, area);
         self.draw_doc(f, inner);
@@ -1247,6 +1442,7 @@ impl App {
         if let Some(doc) = self.current() {
             doc.draw(f, area, width, &theme);
         }
+        self.draw_figure(f);
         // After the document, so it shows the section it's scrolled to.
         if let Some(pane) = pane {
             self.draw_outline_pane(f, pane);
@@ -1303,7 +1499,7 @@ impl App {
                     ("↑↓", "scroll"),
                     ("c", "comments"),
                     ("]", "next comment"),
-                    ("⇧↑↓", "next story"),
+                    ("^j ^k", "next story"),
                     ("/", "search"),
                     ("f", "follow"),
                     ("w", "open"),
@@ -1330,8 +1526,6 @@ impl App {
                 None => d.position(),
             })
             .unwrap_or_default();
-        let fetching = if self.waiting > 0 { "⋯ " } else { "" };
-        let position = format!("{fetching}{position}");
         let pos_width = wrap::width(&position) as u16 + 1;
         let [keys_area, pos_area] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(pos_width)]).areas(area);
@@ -1408,7 +1602,7 @@ fn title_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let Some(story) = story else {
-        return vec![Line::from(" • …").dim()];
+        return vec![Line::from(format!(" {} ", crate::fetch::spinner())).dim()];
     };
     const INDENT: &str = "   ";
     let hit = Style::new().yellow().bold();
@@ -1505,7 +1699,7 @@ fn draw_help(f: &mut Frame) {
         ("↑↓ j k", "Move / scroll"),
         ("⏎ → l", "Read the selected story full screen"),
         ("tab", "Between the list and the story (both stay, if there's room)"),
-        ("⇧↓ ⇧↑ > <", "Next / previous story, reading"),
+        ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
         ("esc ← h", "Back to the list (esc quits there)"),
         ("q", "Quit"),
         ("c", "To the comments, and back"),
@@ -1516,7 +1710,10 @@ fn draw_help(f: &mut Frame) {
         ("y Y", "Copy the story's link / its HN page"),
         ("1-6", "Top, New, Best, Ask, Show, Jobs"),
         ("s", "Search all of HN's stories"),
-        ("r", "Reload"),
+        ("v", "Upvote the story, or choose a comment on screen"),
+        ("r", "Reply to the story, or choose a comment on screen"),
+        ("L", "Log in to HN, or out"),
+        ("R", "Reload"),
         ("t", "Pick a color theme"),
         ("/ n N", "Search; next / previous match"),
         ("^s ^r", "Search forward / back; typing: next / previous"),
@@ -1855,6 +2052,15 @@ mod tests {
         app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT));
         assert_eq!(app.reading, Some(1));
         app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT));
+        assert_eq!(app.reading, Some(2));
+        // And Ctrl, with the arrows or on the home row.
+        app.key(KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL));
+        assert_eq!(app.reading, Some(1));
+        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL));
+        assert_eq!(app.reading, Some(2));
+        app.key(KeyEvent::new(KeyCode::Down, KeyModifiers::CONTROL));
+        assert_eq!(app.reading, Some(3));
+        app.key(KeyEvent::new(KeyCode::Up, KeyModifiers::CONTROL));
         assert_eq!(app.reading, Some(2));
     }
 

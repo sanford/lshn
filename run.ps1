@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $binDir = Join-Path $HOME '.local\bin'
 
-cargo build --release --quiet
+cargo build --release
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force $binDir | Out-Null
 Copy-Item target\release\lshn.exe $binDir -Force

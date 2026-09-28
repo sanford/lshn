@@ -39,7 +39,12 @@ pub fn fetch(url: &str) -> Article {
 }
 
 fn fetch_html(url: &str) -> Result<String, String> {
-    let mut response = hn::agent().get(url).call().map_err(|e| e.to_string())?;
+    let mut response = hn::agent().get(url).call().map_err(|e| match e {
+        ureq::Error::StatusCode(404 | 410) => "the page is gone".to_string(),
+        ureq::Error::StatusCode(401 | 403) => "the site wouldn't let lshn in".to_string(),
+        ureq::Error::StatusCode(code) => format!("the site answered {code}"),
+        e => e.to_string(),
+    })?;
     let kind = response
         .headers()
         .get("content-type")
