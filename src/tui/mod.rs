@@ -215,8 +215,8 @@ struct App {
     /// Where the picture was last put (story, row), and when it moved.
     figure_at: Option<(u64, i32)>,
     figure_moved: Option<Instant>,
-    /// Moving fast: the picture waits till it stops.
-    figure_hidden: bool,
+    /// Moving fast: the picture is soft, or waits, till it stops.
+    figure_moving: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
     user_docs: HashMap<String, Doc>,
@@ -316,7 +316,7 @@ impl App {
             drawn: None,
             figure_at: None,
             figure_moved: None,
-            figure_hidden: false,
+            figure_moving: false,
             docs: HashMap::new(),
             users: HashMap::new(),
             user_docs: HashMap::new(),
@@ -375,7 +375,7 @@ impl App {
             ratatui::crossterm::execute!(io::stdout(), EndSynchronizedUpdate)?;
             // While fetching, wake up often to show what's come; otherwise
             // now and then, to keep the ages current.
-            let wait = if self.waiting.any() || self.figure_hidden {
+            let wait = if self.waiting.any() || self.figure_moving {
                 Duration::from_millis(30)
             } else {
                 Duration::from_secs(1)
@@ -1375,7 +1375,7 @@ impl App {
             .and_then(|(id, _)| Some((id, self.current()?.figure()?)));
         let Some((id, (area, figure, y))) = on_screen else {
             // Nothing to wait for.
-            self.figure_hidden = false;
+            self.figure_moving = false;
             return;
         };
         let (Some(picker), Some(picture)) = (&self.picker, self.figures.get(&id)) else {
@@ -1383,18 +1383,16 @@ impl App {
         };
         // A picture is sent again whenever it moves, which is a lot for a
         // terminal to keep up with at a key's repeat rate: moving again
-        // soon after the last move, it's hidden till things settle.
+        // soon after the last move, it's shown with less detail, or not at
+        // all, till things settle.
         let now = Instant::now();
         let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
         if self.figure_at != Some((id, y)) {
-            self.figure_hidden = !settled;
+            self.figure_moving = !settled;
             self.figure_at = Some((id, y));
             self.figure_moved = Some(now);
         } else if settled {
-            self.figure_hidden = false;
-        }
-        if self.figure_hidden {
-            return;
+            self.figure_moving = false;
         }
         let key = (id, figure.cols, figure.rows);
         if self.drawn.as_ref().is_none_or(|(k, _)| *k != key) {
@@ -1402,9 +1400,13 @@ impl App {
                 .map(|d| (key, d));
         }
         if let Some((_, drawn)) = &self.drawn {
+            let moving = self.figure_moving;
+            if moving && !drawn.has_soft() {
+                return;
+            }
             // Centred over the text.
             let x = figure.width.saturating_sub(figure.cols) / 2;
-            drawn.draw(f.buffer_mut(), area, x as u16, y);
+            drawn.draw(f.buffer_mut(), area, x as u16, y, moving);
         }
     }
 

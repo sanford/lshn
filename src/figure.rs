@@ -101,8 +101,13 @@ pub fn decode(bytes: &[u8]) -> Result<DynamicImage, String> {
 pub enum Drawn {
     /// iTerm2: a picture per row, so it can scroll partly off screen. As
     /// JPEG, when it's opaque: the rows are sent again at each step of a
-    /// scroll, and PNG is ten times the size for a photo.
-    Rows { cols: usize, rows: Vec<String> },
+    /// scroll, and PNG is ten times the size for a photo. `soft` is the
+    /// same at a sixteenth of the resolution, for while it's moving.
+    Rows {
+        cols: usize,
+        rows: Vec<String>,
+        soft: Vec<String>,
+    },
     /// Anything else, as ratatui-image does it.
     Sliced(SlicedProtocol),
 }
@@ -111,20 +116,28 @@ impl Drawn {
     pub fn new(picker: &Picker, picture: &DynamicImage, cols: usize, rows: usize) -> Option<Drawn> {
         if picker.protocol_type() == ProtocolType::Iterm2 {
             let cell = picker.font_size();
+            let (cw, ch) = (cell.width.into(), cell.height.into());
             return Some(Drawn::Rows {
                 cols,
-                rows: iterm_rows(picture, cols, rows, cell.width.into(), cell.height.into())?,
+                rows: iterm_rows(picture, cols, rows, cw, ch, 1)?,
+                soft: iterm_rows(picture, cols, rows, cw, ch, SOFTER)?,
             });
         }
         let size = Size::new(cols as u16, rows as u16);
         SlicedProtocol::new(picker, picture.clone(), Some(size)).ok().map(Drawn::Sliced)
     }
 
+    /// Whether there's a lighter version to show while it moves.
+    pub fn has_soft(&self) -> bool {
+        matches!(self, Drawn::Rows { .. })
+    }
+
     /// Draws it `x` columns into `area` and `y` rows down, which is above
-    /// the top once it's scrolled partly off.
-    pub fn draw(&self, buf: &mut Buffer, area: Rect, x: u16, y: i32) {
+    /// the top once it's scrolled partly off; `soft` while it's moving.
+    pub fn draw(&self, buf: &mut Buffer, area: Rect, x: u16, y: i32, soft: bool) {
         match self {
-            Drawn::Rows { cols, rows } => {
+            Drawn::Rows { cols, rows, soft: light } => {
+                let rows = if soft { light } else { rows };
                 let left = area.x + x;
                 let cols = (*cols as u16).min(area.right().saturating_sub(left));
                 for (i, row) in rows.iter().enumerate() {
@@ -154,9 +167,20 @@ impl Drawn {
     }
 }
 
+/// How much less detail the picture has while it moves, each way.
+const SOFTER: u32 = 16;
+
 /// iTerm2's escape for each row of the picture at `cols`×`rows` cells,
-/// each clearing its row first.
-fn iterm_rows(picture: &DynamicImage, cols: usize, rows: usize, cw: u32, ch: u32) -> Option<Vec<String>> {
+/// each clearing its row first. With `less` over 1, each row has that
+/// much less detail each way, and iTerm2 stretches it to fit.
+fn iterm_rows(
+    picture: &DynamicImage,
+    cols: usize,
+    rows: usize,
+    cw: u32,
+    ch: u32,
+    less: u32,
+) -> Option<Vec<String>> {
     use base64::Engine;
     let scaled = picture.resize(cols as u32 * cw, rows as u32 * ch, FilterType::Triangle);
     let opaque = !scaled.color().has_alpha();
@@ -164,7 +188,12 @@ fn iterm_rows(picture: &DynamicImage, cols: usize, rows: usize, cw: u32, ch: u32
     let mut y = 0;
     while y < scaled.height() {
         let h = ch.min(scaled.height() - y);
-        let row = scaled.crop_imm(0, y, scaled.width(), h);
+        let (w, row) = (scaled.width(), scaled.crop_imm(0, y, scaled.width(), h));
+        let row = if less > 1 {
+            row.resize_exact((w / less).max(1), (h / less).max(1), FilterType::Triangle)
+        } else {
+            row
+        };
         let mut bytes = Vec::new();
         if opaque {
             row.to_rgb8()
@@ -175,9 +204,8 @@ fn iterm_rows(picture: &DynamicImage, cols: usize, rows: usize, cw: u32, ch: u32
                 .ok()?;
         }
         out.push(format!(
-            "\x1b[{cols}X\x1b]1337;File=inline=1;size={};width={}px;height={h}px;preserveAspectRatio=0;doNotMoveCursor=1:{}\x07",
+            "\x1b[{cols}X\x1b]1337;File=inline=1;size={};width={w}px;height={h}px;preserveAspectRatio=0;doNotMoveCursor=1:{}\x07",
             bytes.len(),
-            row.width(),
             base64::engine::general_purpose::STANDARD.encode(&bytes),
         ));
         y += h;
