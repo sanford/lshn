@@ -10,7 +10,7 @@
 //! isn't fetched again.
 
 use crate::article::{self, Article};
-use crate::hn::{self, Comment, Feed, Story};
+use crate::hn::{self, Comment, Feed, Story, User};
 use crate::store::Cache;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -29,6 +29,8 @@ pub enum Job {
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
     Article(u64, String),
+    /// Someone's profile and latest posts.
+    User(String),
 }
 
 pub enum Got {
@@ -37,6 +39,7 @@ pub enum Got {
     Story(u64, Result<Story, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
+    User(String, Result<User, String>),
 }
 
 /// Something back from the fetcher.
@@ -163,6 +166,16 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                 cache.put("thread", &id.to_string(), comments);
             }
             send(Got::Thread(id, fresh), true)
+        }
+        Job::User(name) => {
+            if let Some(user) = cache.get("user", &name) {
+                send(Got::User(name.clone(), Ok(user)), false)?;
+            }
+            let fresh = hn::user(&name);
+            if let Ok(user) = &fresh {
+                cache.put("user", &name, user);
+            }
+            send(Got::User(name, fresh), true)
         }
         Job::Article(id, url) => {
             if let Some(article) = cache.get("article", &id.to_string()) {

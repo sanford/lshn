@@ -165,6 +165,136 @@ pub fn story(id: u64) -> Result<Story, String> {
     story.ok_or_else(|| format!("No item {id}"))
 }
 
+/// Someone on HN, and what they've posted lately.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct User {
+    pub id: String,
+    /// Seconds since the epoch.
+    pub created: u64,
+    pub karma: u64,
+    /// As HTML.
+    pub about: Option<String>,
+    /// Newest first.
+    pub recent: Vec<Post>,
+}
+
+/// A story or comment someone posted.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Post {
+    pub id: u64,
+    pub time: u64,
+    /// A story's title; `None` for a comment.
+    pub title: Option<String>,
+    pub url: Option<String>,
+    pub points: Option<u64>,
+    pub comments: Option<u64>,
+    /// A comment's text, as HTML.
+    pub text: Option<String>,
+    /// The story a comment is on.
+    pub story_id: Option<u64>,
+    pub story_title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PostHit {
+    #[serde(rename = "objectID")]
+    id: String,
+    #[serde(default)]
+    created_at_i: u64,
+    title: Option<String>,
+    url: Option<String>,
+    points: Option<u64>,
+    num_comments: Option<u64>,
+    comment_text: Option<String>,
+    story_id: Option<u64>,
+    story_title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PostHits {
+    hits: Vec<PostHit>,
+}
+
+/// Whether `name` could be an HN username: letters, digits, `-` and `_`.
+pub fn is_username(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 32
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+}
+
+pub fn user_url(name: &str) -> String {
+    format!("https://news.ycombinator.com/user?id={name}")
+}
+
+/// Someone's profile, from HN, and their latest posts, from Algolia.
+pub fn user(name: &str) -> Result<User, String> {
+    if !is_username(name) {
+        return Err(format!("{name} isn't a username"));
+    }
+    let user: Option<User> = get_json(&format!("{FIREBASE}/user/{name}.json"))?;
+    let mut user = user.ok_or_else(|| format!("No user {name}"))?;
+    let hits: PostHits = agent()
+        .get(format!("{ALGOLIA}/search_by_date"))
+        .query("tags", format!("author_{name}"))
+        .query("hitsPerPage", "30")
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .with_config()
+        .limit(MAX_JSON)
+        .read_json()
+        .map_err(|e| e.to_string())?;
+    user.recent = hits
+        .hits
+        .into_iter()
+        .filter_map(|h| {
+            Some(Post {
+                id: h.id.parse().ok()?,
+                time: h.created_at_i,
+                title: h.title.filter(|_| h.comment_text.is_none()),
+                url: h.url,
+                points: h.points,
+                comments: h.num_comments,
+                text: h.comment_text,
+                story_id: h.story_id,
+                story_title: h.story_title,
+            })
+        })
+        .collect();
+    Ok(user)
+}
+
+/// Where a link on HN goes, when it's somewhere lshn can show.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Link {
+    Item(u64),
+    User(String),
+}
+
+/// The story or user an HN link is to, like
+/// `https://news.ycombinator.com/item?id=123`.
+pub fn link(url: &str) -> Option<Link> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let rest = rest.strip_prefix("news.ycombinator.com/")?;
+    let (page, query) = rest.split_once('?')?;
+    let query = query.split('#').next().unwrap_or("");
+    let id = query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("id="))?;
+    match page {
+        "item" => id.parse().ok().map(Link::Item),
+        "user" if is_username(id) => Some(Link::User(id.to_string())),
+        _ => None,
+    }
+}
+
 #[derive(Deserialize)]
 struct SearchResults {
     hits: Vec<SearchHit>,
@@ -249,6 +379,16 @@ mod tests {
             Some("blog.x.dev:8080")
         );
         assert_eq!(domain("not a url"), None);
+    }
+
+    #[test]
+    fn knows_hn_links() {
+        assert_eq!(link("https://news.ycombinator.com/item?id=123"), Some(Link::Item(123)));
+        assert_eq!(link("http://news.ycombinator.com/item?id=9&p=2#x"), Some(Link::Item(9)));
+        assert_eq!(link("https://news.ycombinator.com/user?id=pg"), Some(Link::User("pg".into())));
+        assert_eq!(link("https://news.ycombinator.com/user?id=a%20b"), None);
+        assert_eq!(link("https://news.ycombinator.com/newest"), None);
+        assert_eq!(link("https://example.com/item?id=1"), None);
     }
 
     #[test]

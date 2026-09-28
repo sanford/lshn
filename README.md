@@ -44,7 +44,7 @@ Reading:
 | `o` `O` | The outline: the article's headings and each top-level comment |
 | `/` `n` `N` | Search the story; next and previous match |
 | `f` | Follow a link: type the letters drawn on it |
-| `Esc` `←` `h` `Tab` | Back to the list. `←` never quits, however many times you press it |
+| `Esc` `←` `h` | Back to where you followed a link from, then to the list. `←` never quits, however many times you press it |
 | `⇧↓` `⇧↑` (or `>` `<`) | Next and previous story: what `↓` and `↑` do in the list |
 | `\` | Keep the list on screen while reading |
 
@@ -59,6 +59,10 @@ Anywhere:
 | `?` | All of the above |
 
 Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
+
+### Following links
+
+Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes.
 
 ### What it remembers
 

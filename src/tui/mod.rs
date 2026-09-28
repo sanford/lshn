@@ -10,7 +10,7 @@ mod themes;
 use crate::article::Article;
 use crate::doc::Doc;
 use crate::fetch::{Done, Fetcher, Got, Job};
-use crate::hn::{Comment, Feed, Story};
+use crate::hn::{Comment, Feed, Story, User};
 use crate::omarchy::Follow;
 use crate::store::{self, Cache, Seen, SeenStore};
 use crate::story::{self, Comments};
@@ -168,6 +168,14 @@ struct App {
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
     docs: HashMap<DocKey, Doc>,
+    users: HashMap<String, Result<User, String>>,
+    user_docs: HashMap<String, Doc>,
+    /// Someone's page, shown in the reader in place of the story.
+    user_page: Option<String>,
+    /// Where following links came from, to go back to.
+    history: Vec<nav::Back>,
+    /// A story an HN link was followed to, to open once it's loaded.
+    opening: Option<u64>,
     /// The stories you've read, and how much of each thread you'd seen.
     seen: SeenStore,
     /// For the story being read: the newest comment seen before it was
@@ -192,6 +200,8 @@ struct App {
     reading: Option<u64>,
     /// Keep the list on screen while reading.
     list_in_reader: bool,
+    /// The story selected when the reader was left for the list.
+    left_on: Option<u64>,
     /// The width stories and the list share, at the last draw.
     body_width: u16,
     /// Where `c` came to the comments from, to go back to.
@@ -242,6 +252,11 @@ impl App {
             threads: HashMap::new(),
             articles: HashMap::new(),
             docs: HashMap::new(),
+            users: HashMap::new(),
+            user_docs: HashMap::new(),
+            user_page: None,
+            history: Vec::new(),
+            opening: None,
             seen,
             marks: HashMap::new(),
             filter: String::new(),
@@ -255,6 +270,7 @@ impl App {
             focus: Focus::List,
             reading: None,
             list_in_reader: false,
+            left_on: None,
             body_width: 0,
             before_comments: HashMap::new(),
             outline_pane: false,
@@ -401,13 +417,28 @@ impl App {
                     list_changed = true;
                 }
                 Got::Search(..) => {}
+                // A link to an HN item that isn't a story: a comment, say.
+                Got::Story(id, Ok(story)) if story.title.is_empty() => {
+                    if self.opening == Some(id) {
+                        self.opening = None;
+                        self.open_outside(&crate::hn::item_url(id));
+                    }
+                }
                 Got::Story(id, Ok(story)) if !story.dead && !story.deleted => {
                     self.stories.insert(id, story);
+                    if self.opening == Some(id) {
+                        self.opening = None;
+                        self.open_story_page(id);
+                    }
                     self.rebuild(id);
                     if self.reading == Some(id) {
                         self.note_seen(id);
                     }
                     list_changed = true;
+                }
+                Got::Story(id, Err(e)) if self.opening == Some(id) && last => {
+                    self.opening = None;
+                    self.flash = Some(format!("Couldn't open it: {e}"));
                 }
                 Got::Story(id, Err(_)) if self.stories.contains_key(&id) => {}
                 Got::Story(id, _) => {
@@ -420,6 +451,16 @@ impl App {
                     self.rebuild(id);
                     if self.reading == Some(id) {
                         self.note_seen(id);
+                    }
+                }
+                Got::User(name, result) => {
+                    let failed = result.is_err();
+                    if !(failed && matches!(self.users.get(&name), Some(Ok(_)))) {
+                        self.users.insert(name.clone(), result);
+                    }
+                    let md = story::user_markdown(&name, self.users.get(&name), now());
+                    if let Some(doc) = self.user_docs.get_mut(&name) {
+                        doc.replace(md);
                     }
                 }
                 Got::Article(id, article) => {
@@ -556,6 +597,7 @@ impl App {
     fn current_key(&self) -> Option<DocKey> {
         match self.focus {
             Focus::Reader => self.reading.map(|id| (id, false)),
+            _ if self.kept() => self.reading.map(|id| (id, false)),
             // The story being read stays whole, and where it was, while
             // it's selected; the others show their previews.
             Focus::List => self
@@ -565,6 +607,11 @@ impl App {
     }
 
     fn current(&mut self) -> Option<&mut Doc> {
+        if (self.focus == Focus::Reader || self.kept())
+            && let Some(name) = self.user_page.clone()
+        {
+            return Some(self.user_doc(&name));
+        }
         let key = self.current_key()?;
         Some(self.doc(key))
     }
@@ -646,11 +693,14 @@ impl App {
     /// same comment, or the same part of the article.
     fn read_selected(&mut self) {
         let Some(id) = self.selected_id() else { return };
-        if self.reading == Some(id) {
-            // Already on screen whole: carry on from there.
+        if self.kept() || self.reading == Some(id) {
+            // Back to what was being read, links followed and all.
             self.focus = Focus::Reader;
             return;
         }
+        // Another story: a fresh start, with nothing to go back to.
+        self.history.clear();
+        self.user_page = None;
         let preview = self.doc((id, true));
         let in_comments = comments_line(preview).is_some_and(|line| preview.top() >= line);
         let heading = preview
@@ -690,12 +740,29 @@ impl App {
                 self.read_selected();
                 self.list_in_reader = self.body_width >= WIDE;
             }
-            Focus::Reader => self.focus = Focus::List,
+            Focus::Reader => self.leave_reader(),
         }
+    }
+
+    /// From the reader to the list. What was being read stays beside it
+    /// until another story's selected.
+    fn leave_reader(&mut self) {
+        self.focus = Focus::List;
+        self.left_on = self.selected_id();
+    }
+
+    /// In the list, with the reader's page still beside it: nothing else
+    /// has been selected since leaving it.
+    fn kept(&self) -> bool {
+        self.focus == Focus::List && self.left_on.is_some() && self.left_on == self.selected_id()
     }
 
     /// `c`: to the comments, and back to where that came from.
     fn toggle_comments(&mut self) {
+        if self.focus == Focus::Reader && self.user_page.is_some() {
+            self.flash = Some("No comments on someone's page".into());
+            return;
+        }
         let Some(key) = self.current_key() else { return };
         let back = self.before_comments.get(&key).copied();
         let doc = self.doc(key);
@@ -716,9 +783,14 @@ impl App {
     /// `w`: the story's link in the browser (or its HN page, with `W` or
     /// when it has no link).
     fn open_in_browser(&mut self, hn_page: bool) {
-        let id = match self.focus {
-            Focus::Reader => self.reading,
-            Focus::List => self.selected_id(),
+        let reader_shown = self.focus == Focus::Reader || self.kept();
+        if let (true, Some(name)) = (reader_shown, &self.user_page) {
+            let url = crate::hn::user_url(name);
+            return self.open_outside_now(&url);
+        }
+        let id = match self.current_key() {
+            Some((id, _)) => Some(id),
+            None => self.selected_id(),
         };
         let Some(story) = id.and_then(|id| self.stories.get(&id)) else {
             return;
@@ -727,7 +799,13 @@ impl App {
             Some(url) if !hn_page => url.clone(),
             _ => story.hn_url(),
         };
-        match crate::open::web(&url) {
+        self.open_outside_now(&url);
+    }
+
+    /// Opens a web page in the browser, without asking: for `w`, where
+    /// it's the story's own link.
+    fn open_outside_now(&mut self, url: &str) {
+        match crate::open::web(url) {
             Ok(target) => {
                 self.flash = Some(match crate::open::open(&target) {
                     Ok(()) => format!("Opened {}", target.target),
@@ -739,9 +817,18 @@ impl App {
     }
 
     fn copy_link(&mut self, hn_page: bool) {
-        let id = match self.focus {
-            Focus::Reader => self.reading,
-            Focus::List => self.selected_id(),
+        let reader_shown = self.focus == Focus::Reader || self.kept();
+        if let (true, Some(name)) = (reader_shown, &self.user_page) {
+            let url = crate::hn::user_url(name);
+            self.flash = Some(match clipboard::copy(&url) {
+                Ok(how) => format!("Copied {url} {how}"),
+                Err(e) => format!("Couldn't copy: {e}"),
+            });
+            return;
+        }
+        let id = match self.current_key() {
+            Some((id, _)) => Some(id),
+            None => self.selected_id(),
         };
         let Some(story) = id.and_then(|id| self.stories.get(&id)) else {
             return;
@@ -899,10 +986,13 @@ impl App {
         }
         match key.code {
             KeyCode::Char('q') => return true,
-            // Back to the list. Esc never quits from here: that's for the
-            // list, so a Left too many never loses your place.
+            // Back where a link was followed from, then to the list. Esc
+            // never quits from here: that's for the list, so a Left too
+            // many never loses your place.
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
-                self.focus = Focus::List;
+                if !self.go_back() {
+                    self.leave_reader();
+                }
                 return false;
             }
             KeyCode::Char('\\') => {
@@ -1217,7 +1307,12 @@ impl App {
                     ("/", "search"),
                     ("f", "follow"),
                     ("w", "open"),
-                    ("← tab", if searching { "clear search" } else { "list" }),
+                    // Tab always goes to the list; ← and Esc go back first.
+                    match (searching, self.history.is_empty()) {
+                        (true, _) => ("esc", "clear search"),
+                        (false, true) => ("← tab", "list"),
+                        (false, false) => ("←", "back"),
+                    },
                     ("?", "help"),
                 ],
             }
@@ -1677,6 +1772,42 @@ mod tests {
         assert!(app.seen.stories.contains_key(&2));
         let md = app.markdown(1, false);
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
+    }
+
+    /// Following HN links opens stories and people's pages here, and Esc
+    /// comes back through them, each where it was, then to the list.
+    #[test]
+    fn follows_hn_links_and_comes_back() {
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        for id in [1, 2] {
+            app.stories.insert(id, Story { id, title: format!("Story {id}"), ..Story::default() });
+        }
+        app.ids = Some(vec![1]);
+        app.refresh();
+        app.read_selected();
+        app.follow("https://news.ycombinator.com/item?id=2");
+        assert_eq!(app.reading, Some(2));
+        app.follow("https://news.ycombinator.com/user?id=pg");
+        assert_eq!(app.user_page.as_deref(), Some("pg"));
+        assert!(app.current().is_some());
+
+        // Tab to the list and back keeps the page and the way back.
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert!(app.focus == Focus::Reader);
+        assert_eq!(app.user_page.as_deref(), Some("pg"));
+
+        app.key(esc);
+        assert!(app.user_page.is_none() && app.reading == Some(2));
+        app.key(esc);
+        assert!(app.focus == Focus::Reader && app.reading == Some(1));
+        app.key(esc);
+        assert!(app.focus == Focus::List);
+        // A link to the story on screen goes to its comments, not a new page.
+        app.focus = Focus::Reader;
+        app.follow("https://news.ycombinator.com/item?id=1");
+        assert!(app.history.is_empty());
     }
 
     /// Tab goes back and forth between the list and the story: on a wide

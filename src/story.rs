@@ -6,7 +6,7 @@
 //! reads as written and never as Markdown.
 
 use crate::article::{self, Article};
-use crate::hn::{Comment, Story};
+use crate::hn::{self, Comment, Story, User};
 
 /// Replies nest this deep, then stay there, so deep threads keep room.
 const MAX_DEPTH: usize = 10;
@@ -89,7 +89,7 @@ fn details(story: &Story, now: u64) -> String {
     }
     parts.push(format!("{} points", story.score));
     if !story.by.is_empty() {
-        parts.push(format!("**{}**", escape(&story.by)));
+        parts.push(author(&story.by));
     }
     parts.push(ago(story.time, now));
     let s = if story.descendants == 1 { "" } else { "s" };
@@ -197,9 +197,9 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
     let who = if c.by.is_empty() {
         "*\\[deleted\\]*".to_string()
     } else if c.by == context.op {
-        format!("{} (OP)", escape(&c.by))
+        format!("{} (OP)", author(&c.by))
     } else {
-        escape(&c.by)
+        author(&c.by)
     };
     let when = ago(c.time, context.now);
     let new = if context.seen.is_some_and(|seen| c.id > seen) {
@@ -228,6 +228,65 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
     for reply in &c.replies {
         comment(md, reply, depth + 1, context);
     }
+}
+
+/// A username, linked to their page (which lshn shows itself).
+fn author(name: &str) -> String {
+    if hn::is_username(name) {
+        format!("[{}](<{}>)", escape(name), hn::user_url(name))
+    } else {
+        escape(name)
+    }
+}
+
+/// Someone's page: who they are, then what they've posted lately, each a
+/// heading so `]` and `[` go between them.
+pub fn user_markdown(name: &str, user: Option<&Result<User, String>>, now: u64) -> String {
+    let mut md = format!("# {}\n\n", escape(name));
+    let user = match user {
+        None => return md + "*Loading…*\n",
+        Some(Err(e)) => return md + &format!("*Couldn't load: {}*\n", escape(e)),
+        Some(Ok(user)) => user,
+    };
+    md.push_str(&format!(
+        "{} karma · joined {} · [on HN](<{}>)\n\n",
+        user.karma,
+        ago(user.created, now),
+        hn::user_url(name)
+    ));
+    if let Some(about) = user.about.as_deref().filter(|a| !a.trim().is_empty()) {
+        md.push_str(&html_to_md(about));
+        md.push_str("\n\n");
+    }
+    md.push_str("## Recent\n\n");
+    if user.recent.is_empty() {
+        md.push_str("*Nothing yet.*\n");
+    }
+    for post in &user.recent {
+        let when = ago(post.time, now);
+        match (&post.title, &post.text) {
+            (Some(title), _) => {
+                md.push_str(&format!(
+                    "### [{}](<{}>)\n\n{} points · {} comments · {when}\n\n",
+                    escape(title),
+                    hn::item_url(post.id),
+                    post.points.unwrap_or(0),
+                    post.comments.unwrap_or(0),
+                ));
+            }
+            (None, Some(text)) => {
+                let on = match (post.story_id, &post.story_title) {
+                    (Some(id), Some(title)) => {
+                        format!("On [{}](<{}>)", escape(title), hn::item_url(id))
+                    }
+                    _ => "A comment".into(),
+                };
+                md.push_str(&format!("### {on} · {when}\n\n{}\n\n", html_to_md(text)));
+            }
+            (None, None) => {}
+        }
+    }
+    md
 }
 
 /// "3h ago", from seconds since the epoch.
@@ -506,8 +565,8 @@ mod tests {
         assert!(md.contains("[example\\.com](<https://www.example.com/post>) · 42 points"));
         assert!(md.contains("*Loading the article…*"));
         assert!(md.contains("## Comments (2)\n"));
-        assert!(md.contains("### bob · 2h ago\n\nTop\n\nsecond\n"), "{md}");
-        assert!(md.contains("> **alice (OP)** · 1h ago\n>\n> reply\n"), "{md}");
+        assert!(md.contains("### [bob](<https://news.ycombinator.com/user?id=bob>) · 2h ago\n\nTop\n\nsecond\n"), "{md}");
+        assert!(md.contains("> **[alice](<https://news.ycombinator.com/user?id=alice>) (OP)** · 1h ago\n>\n> reply\n"), "{md}");
     }
 
     #[test]
@@ -527,11 +586,43 @@ mod tests {
         }];
         let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Some(20));
         assert!(md.contains("## Comments (2, 1 new)"), "{md}");
-        assert!(md.contains("### bob · now\n"), "{md}");
-        assert!(md.contains("> **carol** · now · `new`"), "{md}");
+        assert!(md.contains("id=bob>) · now\n"), "{md}");
+        assert!(md.contains("id=carol>)** · now · `new`"), "{md}");
         // Never read: nothing's new.
         let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, None);
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
+    }
+
+    #[test]
+    fn user_pages_list_what_theyve_posted() {
+        let user = User {
+            id: "pg".into(),
+            karma: 10,
+            about: Some("Bug fixer.".into()),
+            recent: vec![
+                hn::Post {
+                    id: 2,
+                    text: Some("A reply".into()),
+                    story_id: Some(1),
+                    story_title: Some("An essay".into()),
+                    ..hn::Post::default()
+                },
+                hn::Post {
+                    id: 1,
+                    title: Some("An essay".into()),
+                    points: Some(5),
+                    comments: Some(3),
+                    ..hn::Post::default()
+                },
+            ],
+            ..User::default()
+        };
+        let md = user_markdown("pg", Some(&Ok(user)), 0);
+        assert!(md.starts_with("# pg\n\n10 karma · joined now"), "{md}");
+        assert!(md.contains("Bug fixer\\."));
+        assert!(md.contains("### On [An essay](<https://news.ycombinator.com/item?id=1>) · now\n\nA reply"), "{md}");
+        assert!(md.contains("### [An essay](<https://news.ycombinator.com/item?id=1>)\n\n5 points · 3 comments"), "{md}");
+        assert!(user_markdown("pg", None, 0).contains("Loading"));
     }
 
     #[test]
