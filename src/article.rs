@@ -81,7 +81,8 @@ pub fn extract(html: &str, url: &str) -> Article {
         text_mode: TextMode::Markdown,
         ..Config::default()
     };
-    let parsed = Readability::new(html, Some(url), Some(config)).and_then(|mut r| r.parse());
+    let html = unhide_streamed(html);
+    let parsed = Readability::new(&*html, Some(url), Some(config)).and_then(|mut r| r.parse());
     match parsed {
         Ok(article) => {
             let md = drop_metadata(article.text_content.trim());
@@ -92,6 +93,18 @@ pub fn extract(html: &str, url: &str) -> Article {
             Article::Text { md, words }
         }
         Err(_) => Article::Unreadable("couldn't find the article on the page".into()),
+    }
+}
+
+/// React pages that stream (Next.js's, say) send what they render last in
+/// a hidden `<div hidden id="S:0">`, for a script to move into place. A
+/// reader mode leaves out anything hidden, so there'd be nothing to read.
+fn unhide_streamed(html: &str) -> std::borrow::Cow<'_, str> {
+    const HIDDEN: &str = "<div hidden id=\"S:";
+    if html.contains(HIDDEN) {
+        html.replace(HIDDEN, "<div id=\"S:").into()
+    } else {
+        html.into()
     }
 }
 
@@ -182,6 +195,22 @@ mod tests {
         assert!(md.contains("reasonable length"));
         assert!(!md.contains("Home | About"), "{md}");
         assert!(words > 100);
+    }
+
+    /// As MUBI's Notebook sends it: the article streamed in hidden, and a
+    /// script to move it where the placeholder is.
+    #[test]
+    fn reads_what_react_streamed_in_hidden() {
+        let para = "This is a sentence of reasonable length for an article. ".repeat(12);
+        let html = format!(
+            "<html><head><title>T</title></head><body><div><template id=\"B:0\"></template></div>\
+             <div hidden id=\"S:0\"><div class=\"post-body\"><p>{para}</p><p>{para}</p></div></div>\
+             <script>$RC(\"B:0\",\"S:0\")</script></body></html>"
+        );
+        let Article::Text { md, .. } = extract(&html, "https://example.com/post") else {
+            panic!("no text");
+        };
+        assert!(md.contains("reasonable length"), "{md}");
     }
 
     #[test]
