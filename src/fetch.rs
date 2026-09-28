@@ -4,9 +4,14 @@
 //!
 //! Articles have workers of their own: other sites can be slow to answer,
 //! and HN's quick answers mustn't wait behind them.
+//!
+//! What's in the cache comes back first, straight away, and what's fetched
+//! follows, and goes in the cache. Articles don't change, so a cached one
+//! isn't fetched again.
 
 use crate::article::{self, Article};
 use crate::hn::{self, Comment, Feed, Story};
+use crate::store::Cache;
 use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -24,11 +29,19 @@ pub enum Job {
     Article(u64, String),
 }
 
-pub enum Done {
+pub enum Got {
     Feed(Feed, Result<Vec<u64>, String>),
     Story(u64, Result<Story, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
+}
+
+/// Something back from the fetcher.
+pub struct Done {
+    pub got: Got,
+    /// This finishes the job. Otherwise it's from the cache, and the
+    /// fetched copy is on its way.
+    pub last: bool,
 }
 
 type Queue = Arc<(Mutex<VecDeque<Job>>, Condvar)>;
@@ -40,14 +53,15 @@ pub struct Fetcher {
 }
 
 impl Fetcher {
-    pub fn start() -> Fetcher {
+    pub fn start(cache: Cache) -> Fetcher {
         let (tx, done) = mpsc::channel();
         let pool = |workers| {
             let queue: Queue = Arc::default();
             for _ in 0..workers {
                 let queue = Arc::clone(&queue);
                 let tx = tx.clone();
-                std::thread::spawn(move || work(&queue, &tx));
+                let cache = cache.clone();
+                std::thread::spawn(move || work(&queue, &tx, &cache));
             }
             queue
         };
@@ -89,7 +103,7 @@ impl Fetcher {
     }
 }
 
-fn work(queue: &Queue, tx: &Sender<Done>) {
+fn work(queue: &Queue, tx: &Sender<Done>, cache: &Cache) {
     let (lock, ready) = &**queue;
     loop {
         let job = {
@@ -101,14 +115,58 @@ fn work(queue: &Queue, tx: &Sender<Done>) {
                 queue = ready.wait(queue).unwrap();
             }
         };
-        let done = match job {
-            Job::Feed(feed) => Done::Feed(feed, hn::feed(feed)),
-            Job::Story(id) => Done::Story(id, hn::story(id)),
-            Job::Thread(id, order) => Done::Thread(id, hn::thread(id, &order)),
-            Job::Article(id, url) => Done::Article(id, article::fetch(&url)),
-        };
-        if tx.send(done).is_err() {
+        if run(job, tx, cache).is_none() {
             return;
+        }
+    }
+}
+
+/// Does a job, sending back the cached copy (if there is one) and then
+/// the fetched one. `None` when there's no one left to send to.
+fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
+    let send = |got, last| tx.send(Done { got, last }).ok();
+    match job {
+        Job::Feed(feed) => {
+            let key = feed.name().to_lowercase();
+            if let Some(ids) = cache.get("feed", &key) {
+                send(Got::Feed(feed, Ok(ids)), false)?;
+            }
+            let fresh = hn::feed(feed);
+            if let Ok(ids) = &fresh {
+                cache.put("feed", &key, ids);
+            }
+            send(Got::Feed(feed, fresh), true)
+        }
+        Job::Story(id) => {
+            if let Some(story) = cache.get("story", &id.to_string()) {
+                send(Got::Story(id, Ok(story)), false)?;
+            }
+            let fresh = hn::story(id);
+            if let Ok(story) = &fresh {
+                cache.put("story", &id.to_string(), story);
+            }
+            send(Got::Story(id, fresh), true)
+        }
+        Job::Thread(id, order) => {
+            if let Some(comments) = cache.get("thread", &id.to_string()) {
+                send(Got::Thread(id, Ok(comments)), false)?;
+            }
+            let fresh = hn::thread(id, &order);
+            if let Ok(comments) = &fresh {
+                cache.put("thread", &id.to_string(), comments);
+            }
+            send(Got::Thread(id, fresh), true)
+        }
+        Job::Article(id, url) => {
+            if let Some(article) = cache.get("article", &id.to_string()) {
+                return send(Got::Article(id, article), true);
+            }
+            let article = article::fetch(&url);
+            // What couldn't be read may be readable next time.
+            if matches!(article, Article::Text { .. }) {
+                cache.put("article", &id.to_string(), &article);
+            }
+            send(Got::Article(id, article), true)
         }
     }
 }

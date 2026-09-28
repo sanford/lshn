@@ -9,9 +9,10 @@ mod themes;
 
 use crate::article::Article;
 use crate::doc::Doc;
-use crate::fetch::{Done, Fetcher, Job};
+use crate::fetch::{Done, Fetcher, Got, Job};
 use crate::hn::{Comment, Feed, Story};
 use crate::omarchy::Follow;
+use crate::store::{self, Cache, Seen, SeenStore};
 use crate::story::{self, Comments};
 use crate::theme::{Choice, Mode, Theme};
 use crate::{clipboard, safe, wrap};
@@ -65,7 +66,11 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
         _ if theme.color && !settings.omarchy => crate::theme::detect_dark(),
         _ => true,
     };
-    let mut app = App::new(theme, settings.max_width, Fetcher::start());
+    let dir = store::dir();
+    let cache = Cache::new(dir.as_deref());
+    cache.prune();
+    let seen = SeenStore::load(dir.as_deref(), now());
+    let mut app = App::new(theme, settings.max_width, Fetcher::start(cache), seen);
     app.choice = settings.choice;
     app.terminal_dark = terminal_dark;
     if settings.omarchy {
@@ -156,6 +161,12 @@ struct App {
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
     docs: HashMap<DocKey, Doc>,
+    /// The stories you've read, and how much of each thread you'd seen.
+    seen: SeenStore,
+    /// For the story being read: the newest comment seen before it was
+    /// opened, so what's new stays marked while it's read, though `seen`
+    /// has moved on.
+    marks: HashMap<u64, Option<u64>>,
 
     filter: String,
     typing: bool,
@@ -202,7 +213,7 @@ struct App {
 }
 
 impl App {
-    fn new(theme: Theme, max_width: Option<usize>, fetcher: Fetcher) -> App {
+    fn new(theme: Theme, max_width: Option<usize>, fetcher: Fetcher, seen: SeenStore) -> App {
         App {
             theme: Rc::new(theme),
             choice: Choice::Mode(Mode::Auto),
@@ -222,6 +233,8 @@ impl App {
             threads: HashMap::new(),
             articles: HashMap::new(),
             docs: HashMap::new(),
+            seen,
+            marks: HashMap::new(),
             filter: String::new(),
             typing: false,
             matcher: Matcher::new(Config::DEFAULT),
@@ -315,37 +328,52 @@ impl App {
         self.flash = Some(format!("Reloading {}…", feed.name()));
     }
 
-    /// Takes in whatever the fetcher has sent back.
+    /// Takes in whatever the fetcher has sent back. A cached copy shows
+    /// until the fetched one replaces it; if fetching fails, the cached
+    /// copy stays.
     fn receive(&mut self) {
         let mut list_changed = false;
-        while let Ok(done) = self.fetcher.done.try_recv() {
-            self.waiting = self.waiting.saturating_sub(1);
-            match done {
-                Done::Feed(feed, result) if feed == self.feed => {
+        while let Ok(Done { got, last }) = self.fetcher.done.try_recv() {
+            if last {
+                self.waiting = self.waiting.saturating_sub(1);
+            }
+            match got {
+                Got::Feed(feed, result) if feed == self.feed => {
                     match result {
                         Ok(ids) => {
                             self.ids = Some(ids);
                             self.feed_error = None;
                         }
+                        Err(e) if self.ids.is_some() => {
+                            self.flash = Some(format!("Showing saved stories: {e}"));
+                        }
                         Err(e) => self.feed_error = Some(e),
                     }
                     list_changed = true;
                 }
-                Done::Feed(..) => {}
-                Done::Story(id, Ok(story)) if !story.dead && !story.deleted => {
+                Got::Feed(..) => {}
+                Got::Story(id, Ok(story)) if !story.dead && !story.deleted => {
                     self.stories.insert(id, story);
                     self.rebuild(id);
+                    if self.reading == Some(id) {
+                        self.note_seen(id);
+                    }
                     list_changed = true;
                 }
-                Done::Story(id, _) => {
+                Got::Story(id, Err(_)) if self.stories.contains_key(&id) => {}
+                Got::Story(id, _) => {
                     self.gone.insert(id);
                     list_changed = true;
                 }
-                Done::Thread(id, result) => {
+                Got::Thread(id, Err(_)) if matches!(self.threads.get(&id), Some(Ok(_))) => {}
+                Got::Thread(id, result) => {
                     self.threads.insert(id, result);
                     self.rebuild(id);
+                    if self.reading == Some(id) {
+                        self.note_seen(id);
+                    }
                 }
-                Done::Article(id, article) => {
+                Got::Article(id, article) => {
                     self.articles.insert(id, article);
                     self.rebuild(id);
                 }
@@ -354,6 +382,41 @@ impl App {
         if list_changed {
             self.refresh();
         }
+    }
+
+    /// Remembers that story `id` has been read, as far as its comments go
+    /// now.
+    fn note_seen(&mut self, id: u64) {
+        let Some(story) = self.stories.get(&id) else {
+            return;
+        };
+        let before = self.seen.stories.get(&id).copied().unwrap_or_default();
+        let newest = match self.threads.get(&id) {
+            Some(Ok(comments)) => comments.iter().map(|c| c.newest()).max().unwrap_or(0),
+            _ => 0,
+        };
+        let seen = Seen {
+            at: now(),
+            newest: newest.max(before.newest),
+            count: story.descendants,
+        };
+        if seen != before {
+            self.seen.stories.insert(id, seen);
+            self.seen.save();
+        }
+    }
+
+    /// Opens story `id` in the reader, and leaves the one that was there:
+    /// its comments stop being marked new.
+    fn start_reading(&mut self, id: u64) {
+        if let Some(before) = self.reading.filter(|&r| r != id) {
+            self.marks.remove(&before);
+            self.rebuild(before);
+        }
+        let seen = self.seen.stories.get(&id).map(|s| s.newest);
+        self.marks.entry(id).or_insert(seen);
+        self.reading = Some(id);
+        self.note_seen(id);
     }
 
     /// Asks for the stories around the selection: the list's rows, and the
@@ -414,7 +477,11 @@ impl App {
             Some(Ok(c)) => Comments::Loaded(c),
             Some(Err(e)) => Comments::Failed(e),
         };
-        story::markdown(story, self.articles.get(&id), comments, preview, now())
+        let seen = match self.marks.get(&id) {
+            Some(&marked) => marked,
+            None => self.seen.stories.get(&id).map(|s| s.newest),
+        };
+        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen)
     }
 
     /// Brings a story's documents up to date with what's been fetched.
@@ -540,7 +607,7 @@ impl App {
             .current_heading()
             .map(|i| preview.headings()[i].slug.clone());
         let place = preview.place().filter(|_| preview.top() > 0);
-        self.reading = Some(id);
+        self.start_reading(id);
         self.focus = Focus::Reader;
         let full = self.doc((id, false));
         match (in_comments, heading, place) {
@@ -940,7 +1007,11 @@ impl App {
         let items: Vec<Vec<Line>> = self
             .shown
             .iter()
-            .map(|s| title_lines(self.stories.get(&s.id), &s.hits, width))
+            .map(|s| {
+                let story = self.stories.get(&s.id);
+                let seen = self.seen.stories.get(&s.id);
+                title_lines(story, &s.hits, seen, width)
+            })
             .collect();
         self.list_heights = items.iter().map(Vec::len).collect();
         let items: Vec<ListItem> = items.into_iter().map(ListItem::new).collect();
@@ -1137,25 +1208,42 @@ fn now() -> u64 {
 /// highlighted, wrapped at spaces to fit `width`: titles are what the list is for, so they're
 /// never cut short. (The rest of what's known about a story is at the top
 /// of its page.)
-fn title_lines(story: Option<&Story>, hits: &[u32], width: usize) -> Vec<Line<'static>> {
+fn title_lines(
+    story: Option<&Story>,
+    hits: &[u32],
+    seen: Option<&Seen>,
+    width: usize,
+) -> Vec<Line<'static>> {
     let Some(story) = story else {
         return vec![Line::from(" • …").dim()];
     };
     const INDENT: &str = "   ";
     let hit = Style::new().yellow().bold();
+    // Stories you've read fade, and say how many comments they've had
+    // since.
+    let plain = if seen.is_some() {
+        Style::new().dim()
+    } else {
+        Style::new()
+    };
     let title = safe::printable(&story.title);
-    let chars: Vec<(char, Style)> = title
+    let mut chars: Vec<(char, Style)> = title
         .chars()
         .enumerate()
         .map(|(i, c)| {
             let style = if hits.binary_search(&(i as u32)).is_ok() {
                 hit
             } else {
-                Style::new()
+                plain
             };
             (c, style)
         })
         .collect();
+    let new = seen.map_or(0, |s| story.descendants.saturating_sub(s.count));
+    if new > 0 {
+        chars.push((' ', plain));
+        chars.extend(format!("+{new}").chars().map(|c| (c, Style::new().yellow())));
+    }
 
     // Break at the last space that fits, or mid-word if a word alone
     // doesn't.
@@ -1416,12 +1504,62 @@ mod tests {
             ..Story::default()
         };
         let texts =
-            |width| -> Vec<String> { title_lines(Some(&story), &[], width).iter().map(text).collect() };
+            |width| -> Vec<String> { title_lines(Some(&story), &[], None, width).iter().map(text).collect() };
         assert_eq!(texts(40), [" • A rather long title for a story"]);
         assert_eq!(texts(22), [" • A rather long title", "   for a story"]);
         // A word too long for a row breaks mid-word.
         assert_eq!(texts(6)[..3], [" • A", "   rat", "   her"]);
         assert_eq!(texts(22).concat(), " • A rather long title   for a story");
+    }
+
+    #[test]
+    fn read_stories_say_how_many_comments_theyve_had_since() {
+        let story = Story {
+            title: "Title".into(),
+            descendants: 12,
+            ..Story::default()
+        };
+        let seen = Seen {
+            at: 1,
+            newest: 5,
+            count: 9,
+        };
+        let lines = title_lines(Some(&story), &[], Some(&seen), 40);
+        assert_eq!(text(&lines[0]), " • Title +3");
+        let title = lines[0].spans.iter().find(|s| s.content.contains("Title")).unwrap();
+        assert!(title.style.add_modifier.contains(Modifier::DIM));
+        let caught_up = Seen { count: 12, ..seen };
+        assert_eq!(text(&title_lines(Some(&story), &[], Some(&caught_up), 40)[0]), " • Title");
+    }
+
+    /// Reading a story remembers it, and its comments stay marked new
+    /// until another story is read.
+    #[test]
+    fn reading_remembers_and_marks_new_comments_until_you_move_on() {
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let comment = |id| crate::hn::Comment {
+            id,
+            by: "x".into(),
+            text: "hi".into(),
+            ..crate::hn::Comment::default()
+        };
+        for id in [1, 2] {
+            app.stories.insert(id, Story { id, title: "t".into(), descendants: 2, ..Story::default() });
+        }
+        app.seen.stories.insert(1, Seen { at: 1, newest: 100, count: 1 });
+        app.threads.insert(1, Ok(vec![comment(100), comment(200)]));
+        app.ids = Some(vec![1, 2]);
+        app.refresh();
+
+        app.read_selected();
+        assert!(app.markdown(1, false).contains("(2, 1 new)"));
+        // Seen now goes up to the newest, but it's still marked while read.
+        assert_eq!(app.seen.stories[&1].newest, 200);
+        assert_eq!(app.seen.stories[&1].count, 2);
+        app.next_story(1);
+        assert!(app.seen.stories.contains_key(&2));
+        let md = app.markdown(1, false);
+        assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
     /// Tab goes back and forth between the list and the story: on a wide
@@ -1430,7 +1568,7 @@ mod tests {
     fn tab_switches_views() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         for (width, both) in [(160, true), (100, false)] {
-            let mut app = App::new(Theme::plain(), None, Fetcher::start());
+            let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
             app.body_width = width;
             app.ids = Some(vec![1, 2]);
             app.refresh();
@@ -1450,7 +1588,7 @@ mod tests {
     /// reading, and stop at the ends.
     #[test]
     fn next_and_previous_story() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start());
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.ids = Some(vec![1, 2, 3]);
         app.refresh();
@@ -1476,7 +1614,7 @@ mod tests {
     /// quits, and ← there does nothing.
     #[test]
     fn left_goes_back_but_never_quits() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start());
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
         let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
         app.focus = Focus::Reader;
         assert!(!app.key(key(KeyCode::Left)));

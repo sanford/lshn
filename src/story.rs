@@ -25,12 +25,14 @@ pub const COMMENTS_HEADING: &str = "Comments";
 
 /// The story's document. `article` is `None` while it's still coming;
 /// `preview` shortens a long article, for the list's preview pane.
+/// Comments newer than `seen` (the newest one seen before) are marked new.
 pub fn markdown(
     story: &Story,
     article: Option<&Article>,
     comments: Comments,
     preview: bool,
     now: u64,
+    seen: Option<u64>,
 ) -> String {
     let mut md = String::new();
     md.push_str(&format!("# {}\n\n", escape(&story.title)));
@@ -50,7 +52,15 @@ pub fn markdown(
         Comments::Loaded(c) => c.iter().map(Comment::count).sum(),
         _ => story.descendants as usize,
     };
-    md.push_str(&format!("## {COMMENTS_HEADING} ({count})\n\n"));
+    let new = match (&comments, seen) {
+        (Comments::Loaded(c), Some(seen)) => c.iter().map(|c| c.newer_than(seen)).sum(),
+        _ => 0,
+    };
+    if new > 0 {
+        md.push_str(&format!("## {COMMENTS_HEADING} ({count}, {new} new)\n\n"));
+    } else {
+        md.push_str(&format!("## {COMMENTS_HEADING} ({count})\n\n"));
+    }
     match comments {
         Comments::Loading => md.push_str("*Loading comments…*\n"),
         Comments::Failed(why) => {
@@ -58,8 +68,13 @@ pub fn markdown(
         }
         Comments::Loaded([]) => md.push_str("*No comments yet.*\n"),
         Comments::Loaded(comments) => {
+            let context = Context {
+                op: &story.by,
+                now,
+                seen,
+            };
             for c in comments {
-                comment(&mut md, c, 0, &story.by, now);
+                comment(&mut md, c, 0, &context);
             }
         }
     }
@@ -167,21 +182,35 @@ fn first_words(md: &str, words: usize) -> String {
     out.trim_end().to_string()
 }
 
+/// What every comment's header needs to know.
+struct Context<'a> {
+    /// The story's author, whose comments say so.
+    op: &'a str,
+    now: u64,
+    /// The newest comment seen before: newer ones are marked new.
+    seen: Option<u64>,
+}
+
 /// A comment and its replies. Top-level comments are headings, so `]`,
 /// `[` and the outline go between them; replies nest in quote bars.
-fn comment(md: &mut String, c: &Comment, depth: usize, op: &str, now: u64) {
+fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
     let who = if c.by.is_empty() {
         "*\\[deleted\\]*".to_string()
-    } else if c.by == op {
+    } else if c.by == context.op {
         format!("{} (OP)", escape(&c.by))
     } else {
         escape(&c.by)
     };
-    let when = ago(c.time, now);
-    let mut body = if depth == 0 {
-        format!("### {who} · {when}\n\n")
+    let when = ago(c.time, context.now);
+    let new = if context.seen.is_some_and(|seen| c.id > seen) {
+        " · `new`"
     } else {
-        format!("**{who}** · {when}\n\n")
+        ""
+    };
+    let mut body = if depth == 0 {
+        format!("### {who} · {when}{new}\n\n")
+    } else {
+        format!("**{who}** · {when}{new}\n\n")
     };
     body.push_str(&html_to_md(&c.text));
     let bars = "> ".repeat(depth.min(MAX_DEPTH));
@@ -197,7 +226,7 @@ fn comment(md: &mut String, c: &Comment, depth: usize, op: &str, now: u64) {
     }
     md.push('\n');
     for reply in &c.replies {
-        comment(md, reply, depth + 1, op, now);
+        comment(md, reply, depth + 1, context);
     }
 }
 
@@ -447,13 +476,37 @@ mod tests {
                 replies: vec![],
             }],
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, None);
         assert!(md.starts_with("# Show HN: A \\*thing\\*\n"), "{md}");
         assert!(md.contains("[example\\.com](<https://www.example.com/post>) · 42 points"));
         assert!(md.contains("*Loading the article…*"));
         assert!(md.contains("## Comments (2)\n"));
         assert!(md.contains("### bob · 2h ago\n\nTop\n\nsecond\n"), "{md}");
         assert!(md.contains("> **alice (OP)** · 1h ago\n>\n> reply\n"), "{md}");
+    }
+
+    #[test]
+    fn marks_comments_newer_than_the_last_seen() {
+        let reply = Comment {
+            id: 30,
+            by: "carol".into(),
+            text: "later".into(),
+            ..Comment::default()
+        };
+        let comments = vec![Comment {
+            id: 10,
+            by: "bob".into(),
+            text: "early".into(),
+            replies: vec![reply],
+            ..Comment::default()
+        }];
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Some(20));
+        assert!(md.contains("## Comments (2, 1 new)"), "{md}");
+        assert!(md.contains("### bob · now\n"), "{md}");
+        assert!(md.contains("> **carol** · now · `new`"), "{md}");
+        // Never read: nothing's new.
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, None);
+        assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
     #[test]
@@ -466,8 +519,8 @@ mod tests {
             md: format!("# Show HN: A *thing*\n\n{md}"),
             words: 280,
         };
-        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0);
-        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0);
+        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, None);
+        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, None);
         assert!(full.contains("Paragraph 39"));
         assert!(!preview.contains("Paragraph 39"));
         assert!(preview.contains("min read"));

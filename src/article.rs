@@ -16,7 +16,7 @@ const NOT_ARTICLES: &[(&str, &str)] = &[
     ("twitter.com", "a post on X"),
 ];
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Article {
     /// The article's text as Markdown, and how many words it has.
     Text { md: String, words: usize },

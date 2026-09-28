@@ -59,6 +59,12 @@ Anywhere:
 
 Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
+### What it remembers
+
+Stories you've opened fade in the list, and when they've had comments since, say how many: `+12`. Open one again and its new comments are marked `new`, and the comments' heading counts them. They stay marked while you read, and aren't new any more once you move on.
+
+What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stories and comments show the moment it starts, and are replaced as fresh ones arrive, without losing your place. Without a connection, what's saved is still there to read. Articles are fetched once. What you've read is in `~/.lshn/seen.json`, for 90 days.
+
 ### Where it comes from
 
 Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, and `w` opens them in the browser.

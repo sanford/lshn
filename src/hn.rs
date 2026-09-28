@@ -1,7 +1,7 @@
 //! Hacker News: the story lists and stories from the official Firebase API,
 //! and whole comment threads, in one request each, from Algolia's.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -56,7 +56,7 @@ impl Feed {
 }
 
 /// A story (or job, or poll) as the list shows it.
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Story {
     pub id: u64,
@@ -101,7 +101,7 @@ pub fn domain(url: &str) -> Option<String> {
 }
 
 /// A comment, with its replies.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Comment {
     pub id: u64,
     /// Empty for a deleted comment.
@@ -113,6 +113,17 @@ pub struct Comment {
 }
 
 impl Comment {
+    /// How many of this comment and its replies are newer than comment
+    /// `seen`.
+    pub fn newer_than(&self, seen: u64) -> usize {
+        usize::from(self.id > seen) + self.replies.iter().map(|r| r.newer_than(seen)).sum::<usize>()
+    }
+
+    /// The newest comment's id, of this one and its replies.
+    pub fn newest(&self) -> u64 {
+        self.replies.iter().map(Comment::newest).fold(self.id, u64::max)
+    }
+
     /// How many comments this is, with all its replies.
     pub fn count(&self) -> usize {
         1 + self.replies.iter().map(Comment::count).sum::<usize>()
