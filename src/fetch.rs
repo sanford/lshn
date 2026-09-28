@@ -33,8 +33,8 @@ pub enum Job {
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
     Article(u64, String),
-    /// A story's article's first picture.
-    Figure(u64, String),
+    /// A picture in a story's article: which one, and its address.
+    Figure(u64, usize, String),
     /// Someone's profile and latest posts.
     User(String),
     /// Logging in: a username and password.
@@ -52,7 +52,7 @@ pub enum Got {
     Story(u64, Result<Story, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
-    Figure(u64, Result<DynamicImage, String>),
+    Figure(u64, usize, Result<DynamicImage, String>),
     User(String, Result<User, String>),
     LoggedIn(Result<Session, String>),
     Upvoted(Result<(), String>),
@@ -271,8 +271,8 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             }
             send(Got::User(name, fresh), true)
         }
-        Job::Figure(id, url) => {
-            let key = id.to_string();
+        Job::Figure(id, index, url) => {
+            let key = format!("{id}-{index}");
             let picture = match cache.get_bytes("figure", &key) {
                 Some(bytes) => figure::decode(&bytes),
                 None => figure::download(&url).and_then(|bytes| {
@@ -281,7 +281,7 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                     Ok(picture)
                 }),
             };
-            send(Got::Figure(id, picture), true)
+            send(Got::Figure(id, index, picture), true)
         }
         Job::Article(id, url) => {
             if let Some(article) = cache.get("article", &id.to_string()) {

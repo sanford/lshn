@@ -164,7 +164,7 @@ enum Asked {
     Story(u64),
     Thread(u64),
     Article(u64),
-    Figure(u64),
+    Figure(u64, usize),
 }
 
 /// A story that passes the filter, with the positions of the matched
@@ -206,14 +206,18 @@ struct App {
     mute: Vec<String>,
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
-    /// Articles' first pictures, by story.
-    figures: HashMap<u64, DynamicImage>,
+    /// Articles' pictures, by story and place in the article.
+    figures: HashMap<(u64, usize), DynamicImage>,
+    /// Stories whose every picture has been asked for, not just the first.
+    pictured: HashSet<u64>,
     /// How the terminal draws pictures, once asked; `None` if it isn't to.
     picker: Option<Picker>,
-    /// The picture last drawn, ready at its size: story, columns, rows.
-    drawn: Option<((u64, usize, usize), crate::figure::Drawn)>,
-    /// Where the picture was last put (story, row), and when it moved.
-    figure_at: Option<(u64, i32)>,
+    /// The story's pictures made ready to draw, by story, picture, columns
+    /// and rows.
+    drawn: HashMap<(u64, usize, usize, usize), crate::figure::Drawn>,
+    /// Where the pictures were last put (story, how far it's scrolled),
+    /// and when they moved.
+    figure_at: Option<(u64, usize)>,
     figure_moved: Option<Instant>,
     /// Moving fast: the picture is soft, or waits, till it stops.
     figure_moving: bool,
@@ -312,8 +316,9 @@ impl App {
             threads: HashMap::new(),
             articles: HashMap::new(),
             figures: HashMap::new(),
+            pictured: HashSet::new(),
             picker: None,
-            drawn: None,
+            drawn: HashMap::new(),
             figure_at: None,
             figure_moved: None,
             figure_moving: false,
@@ -553,20 +558,22 @@ impl App {
                 Got::ReplyForm(id, result) => self.got_reply_form(id, result),
                 Got::Posted(story, result) => self.posted(story, result),
                 Got::Article(id, article) => {
+                    // The first picture of every article fetched; the rest
+                    // once it's read.
                     if let (Some(_), Article::Text { md, .. }) = (&self.picker, &article)
-                        && let Some((url, _)) = crate::figure::first(md)
+                        && let Some(first) = crate::figure::all(md).into_iter().next()
                     {
                         let urgent = self.current_key().is_some_and(|(on, _)| on == id);
-                        self.ask(Asked::Figure(id), Job::Figure(id, url), urgent);
+                        self.ask(Asked::Figure(id, 0), Job::Figure(id, 0, first.url), urgent);
                     }
                     self.articles.insert(id, article);
                     self.rebuild(id);
                 }
-                Got::Figure(id, Ok(picture)) => {
-                    self.figures.insert(id, picture);
+                Got::Figure(id, index, Ok(picture)) => {
+                    self.figures.insert((id, index), picture);
                     self.rebuild(id);
                 }
-                Got::Figure(_, Err(_)) => {}
+                Got::Figure(_, _, Err(_)) => {}
             }
         }
         if list_changed {
@@ -612,7 +619,22 @@ impl App {
     /// Asks for the stories around the selection: the list's rows, and the
     /// comments and articles of the stories nearest it, the selected one
     /// first.
+    /// All the pictures of the story being read, once its article's here:
+    /// the first of every article is fetched with it.
+    fn fetch_pictures(&mut self) {
+        let Some(id) = self.reading.filter(|id| self.picker.is_some() && !self.pictured.contains(id)) else {
+            return;
+        };
+        let Some(Article::Text { md, .. }) = self.articles.get(&id) else { return };
+        self.pictured.insert(id);
+        // Each to the front, so the last asked is fetched first.
+        for (i, found) in crate::figure::all(md).into_iter().enumerate().skip(1).rev() {
+            self.ask(Asked::Figure(id, i), Job::Figure(id, i, found.url), true);
+        }
+    }
+
     fn prefetch(&mut self) {
+        self.fetch_pictures();
         let Some(ids) = self.ids.clone() else { return };
         let sel = self.list.selected().unwrap_or(0);
         let selected_id = self.selected_id();
@@ -671,8 +693,8 @@ impl App {
             Some(&marked) => marked,
             None => self.seen.stories.get(&id).map(|s| s.newest),
         };
-        let picture = self.figures.get(&id);
-        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen, picture)
+        let pictures = |i| self.figures.get(&(id, i));
+        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen, &pictures)
     }
 
     /// Brings a story's documents up to date with what's been fetched.
@@ -1371,38 +1393,45 @@ impl App {
         let on_screen = self
             .current_key()
             .filter(|_| !user_page && self.picker.is_some())
-            .filter(|(id, _)| self.figures.contains_key(id))
-            .and_then(|(id, _)| Some((id, self.current()?.figure()?)));
-        let Some((id, (area, figure, y))) = on_screen else {
+            .and_then(|(id, _)| {
+                let doc = self.current()?;
+                let (area, figures) = doc.figures();
+                Some((id, doc.top(), area, figures))
+            })
+            .filter(|(.., figures)| !figures.is_empty());
+        let Some((id, top, area, figures)) = on_screen else {
             // Nothing to wait for.
             self.figure_moving = false;
             return;
         };
-        let (Some(picker), Some(picture)) = (&self.picker, self.figures.get(&id)) else {
-            return;
-        };
-        // A picture is sent again whenever it moves, which is a lot for a
+        // Pictures are sent again whenever they move, which is a lot for a
         // terminal to keep up with at a key's repeat rate: moving again
-        // soon after the last move, it's shown with less detail, or not at
-        // all, till things settle.
+        // soon after the last move, they're shown with less detail, or not
+        // at all, till things settle.
         let now = Instant::now();
         let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
-        if self.figure_at != Some((id, y)) {
+        if self.figure_at != Some((id, top)) {
             self.figure_moving = !settled;
-            self.figure_at = Some((id, y));
+            self.figure_at = Some((id, top));
             self.figure_moved = Some(now);
         } else if settled {
             self.figure_moving = false;
         }
-        let key = (id, figure.cols, figure.rows);
-        if self.drawn.as_ref().is_none_or(|(k, _)| *k != key) {
-            self.drawn = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
-                .map(|d| (key, d));
-        }
-        if let Some((_, drawn)) = &self.drawn {
+        let Some(picker) = &self.picker else { return };
+        // Only this story's are kept ready.
+        self.drawn.retain(|(story, ..), _| *story == id);
+        for (figure, y) in figures {
+            let key = (id, figure.index, figure.cols, figure.rows);
+            if !self.drawn.contains_key(&key)
+                && let Some(picture) = self.figures.get(&(id, figure.index))
+                && let Some(drawn) = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
+            {
+                self.drawn.insert(key, drawn);
+            }
+            let Some(drawn) = self.drawn.get(&key) else { continue };
             let moving = self.figure_moving;
             if moving && !drawn.has_soft() {
-                return;
+                continue;
             }
             // Centred over the text.
             let x = figure.width.saturating_sub(figure.cols) / 2;

@@ -27,14 +27,15 @@ pub struct Rendered {
     pub headings: Vec<Heading>,
     /// Link targets, as written.
     pub links: Vec<String>,
-    /// Room left for a picture, if the document has one.
-    pub figure: Option<Figure>,
+    /// Room left for pictures.
+    pub figures: Vec<Figure>,
 }
 
-/// Where a picture goes: the line it starts on, its size in cells, and
-/// the width of the text it's centred over.
+/// Where a picture goes: which of the article's it is, the line it starts
+/// on, its size in cells, and the width of the text it's centred over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Figure {
+    pub index: usize,
     pub line: usize,
     pub width: usize,
     pub cols: usize,
@@ -105,7 +106,7 @@ pub fn render(
         inline_depth: std::cell::Cell::new(0),
         headings: Vec::new(),
         anchors: Anchorizer::new(),
-        figure: None,
+        figures: Vec::new(),
     };
     for child in root.children() {
         let pos = child.data().sourcepos;
@@ -116,7 +117,7 @@ pub fn render(
         lines: r.out,
         headings: r.headings,
         links: r.links.into_inner(),
-        figure: r.figure,
+        figures: r.figures,
     }
 }
 
@@ -149,7 +150,7 @@ struct Renderer<'t> {
     links: RefCell<Vec<String>>,
     headings: Vec<Heading>,
     anchors: Anchorizer,
-    figure: Option<Figure>,
+    figures: Vec<Figure>,
 }
 
 impl Renderer<'_> {
@@ -471,11 +472,12 @@ impl Renderer<'_> {
             self.labelled_rule(&label);
             return;
         }
-        if let Some((w, h, rows)) = crate::figure::parse_marker(literal) {
+        if let Some((w, h, rows, index)) = crate::figure::parse_marker(literal) {
             // Blank lines for it to be drawn over.
             let (cols, rows) = crate::figure::cells(w, h, self.avail(), rows);
             self.flush_gap();
-            self.figure.get_or_insert(Figure {
+            self.figures.push(Figure {
+                index,
                 line: self.out.len(),
                 width: self.avail(),
                 cols,

@@ -7,6 +7,7 @@
 
 use crate::article::{self, Article};
 use crate::figure;
+use std::ops::Range;
 use crate::hn::{self, Comment, Story, User};
 
 /// Replies nest this deep, then stay there, so deep threads keep room.
@@ -34,7 +35,7 @@ pub fn markdown(
     preview: bool,
     now: u64,
     seen: Option<u64>,
-    picture: Option<&image::DynamicImage>,
+    pictures: Pictures,
 ) -> String {
     let mut md = String::new();
     md.push_str(&format!("# {}\n\n", escape(&story.title)));
@@ -48,7 +49,7 @@ pub fn markdown(
     if story.url.is_some() {
         // Thin rules around what came from the site rather than from HN.
         md.push_str(&article_rule(story, article));
-        md.push_str(&article_md(story, article, preview, picture));
+        md.push_str(&article_md(story, article, preview, pictures));
         md.push_str("\n\n---\n\n");
     }
 
@@ -119,29 +120,33 @@ fn article_rule(story: &Story, article: Option<&Article>) -> String {
     format!("<!-- rule: {label} -->\n\n")
 }
 
-/// With its first picture, once that's fetched, moved to the top.
-fn article_md(
-    story: &Story,
-    article: Option<&Article>,
-    preview: bool,
-    picture: Option<&image::DynamicImage>,
-) -> String {
+/// The article's pictures that have been fetched, by their place in it.
+pub type Pictures<'a> = &'a dyn Fn(usize) -> Option<&'a image::DynamicImage>;
+
+/// With its pictures, once they're fetched: the first at the top, the rest
+/// after the paragraphs they're in. The preview has only the first.
+fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures: Pictures) -> String {
     match article {
         None => "*Loading the article…*".into(),
         // A note with a bar down its left, so it isn't read as the article.
-        Some(Article::Unreadable(why)) => format!(
-            "> [!NOTE] No article text\n> {}. `w` opens it in the browser.",
-            escape(&capitalized(why))
-        ),
-        Some(Article::Text { md, words }) => {
-            let mut top = String::new();
-            let mut md = md.clone();
-            if let (Some(picture), Some((_, at))) = (picture, figure::first(&md)) {
-                md.replace_range(at, "");
-                let rows = if preview { figure::PREVIEW_ROWS } else { figure::FULL_ROWS };
-                top = format!("{}\n\n", figure::marker(picture, rows));
+        Some(Article::Unreadable(why)) => {
+            let mut note = format!(
+                "> [!NOTE] Couldn't read the article\n> {}.",
+                escape(&capitalized(why))
+            );
+            if let Some(url) = &story.url {
+                // The address, and right under it how to get there.
+                note.push_str(&format!(
+                    "\n>\n> [{}](<{}>)\\\n> `w` opens it in your browser, `y` copies it.",
+                    escape(url),
+                    link_target(url)
+                ));
             }
-            let md = top + &demote_headings(&md, &story.title);
+            note
+        }
+        Some(Article::Text { md, words }) => {
+            let md = with_pictures(md, preview, pictures);
+            let md = demote_headings(&md, &story.title);
             if preview && *words > PREVIEW_WORDS * 3 / 2 {
                 format!(
                     "{}\n\n*… {} min read, `⏎` for the rest*",
@@ -161,6 +166,26 @@ fn capitalized(s: &str) -> String {
         Some(first) => first.to_uppercase().chain(chars).collect(),
         None => String::new(),
     }
+}
+
+fn with_pictures(md: &str, preview: bool, pictures: Pictures) -> String {
+    let rows = if preview { figure::PREVIEW_ROWS } else { figure::FULL_ROWS };
+    let found = figure::all(md);
+    let shown = if preview { &found[..found.len().min(1)] } else { &found[..] };
+    // From the end back, so what's left to do stays where it was found.
+    let mut edits: Vec<(usize, Range<usize>, String)> = Vec::new();
+    for (i, f) in shown.iter().enumerate() {
+        let Some(picture) = pictures(i) else { continue };
+        let at = if i == 0 { 0 } else { f.after };
+        edits.push((i, at..at, format!("\n\n{}\n\n", figure::marker(picture, rows, i))));
+        edits.push((i, f.at.clone(), String::new()));
+    }
+    edits.sort_by_key(|(i, range, _)| (std::cmp::Reverse(range.start), std::cmp::Reverse(*i)));
+    let mut md = md.to_string();
+    for (_, range, text) in edits {
+        md.replace_range(range, &text);
+    }
+    md.trim_start().to_string()
 }
 
 /// The article's headings one level down, under the story's title, and
@@ -635,7 +660,7 @@ mod tests {
                 replies: vec![],
             }],
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, None, None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, None, &|_| None);
         assert!(md.starts_with("# Show HN: A \\*thing\\*\n"), "{md}");
         assert!(md.contains("[example\\.com](<https://www.example.com/post>) · 42 points"));
         assert!(md.contains("*Loading the article…*"));
@@ -662,12 +687,12 @@ mod tests {
             replies: vec![reply],
             ..Comment::default()
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Some(20), None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Some(20), &|_| None);
         assert!(md.contains("## Comments (2, 1 new)"), "{md}");
         assert!(md.contains("id=bob>) · [now](<https://news.ycombinator.com/item?id=10>)\n"), "{md}");
         assert!(md.contains("id=carol>)** · [now](<https://news.ycombinator.com/item?id=30>) · `new`"), "{md}");
         // Never read: nothing's new.
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, None, None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, None, &|_| None);
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
@@ -704,6 +729,34 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_articles_say_why_and_where_they_are() {
+        let article = Article::Unreadable("the page is gone".into());
+        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, None, &|_| None);
+        assert!(md.contains("> [!NOTE] Couldn't read the article\n> The page is gone."), "{md}");
+        assert!(
+            md.contains("> [https://www\\.example\\.com/post](<https://www.example.com/post>)\\\n> `w` opens it"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn pictures_go_first_and_after_their_paragraphs() {
+        let md = "Intro.\n\n![one](https://x.com/1.jpg)\n\nText ![two](https://x.com/2.jpg) more.\n\nEnd.";
+        let picture = image::DynamicImage::new_rgb8(400, 200);
+        let both = |_| Some(&picture);
+        assert_eq!(
+            with_pictures(md, false, &both),
+            "<!-- image: 400 200 24 0 -->\n\nIntro.\n\n\n\nText  more.\n\n\n<!-- image: 400 200 24 1 -->\n\n\nEnd."
+        );
+        // Only what's been fetched; the rest stay links for now.
+        let first = |i| (i == 0).then_some(&picture);
+        let shown = with_pictures(md, false, &first);
+        assert!(shown.contains("![two]") && !shown.contains("![one]"), "{shown}");
+        // Previews have only the first.
+        assert!(!with_pictures(md, true, &both).contains("image: 400 200 12 1"));
+    }
+
+    #[test]
     fn previews_cut_long_articles_short() {
         let md = (0..40)
             .map(|i| format!("Paragraph {i} has exactly seven words here."))
@@ -713,8 +766,8 @@ mod tests {
             md: format!("# Show HN: A *thing*\n\n{md}"),
             words: 280,
         };
-        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, None, None);
-        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, None, None);
+        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, None, &|_| None);
+        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, None, &|_| None);
         assert!(full.contains("Paragraph 39"));
         assert!(!preview.contains("Paragraph 39"));
         assert!(preview.contains("min read"));

@@ -1,11 +1,12 @@
-//! An article's first picture, shown at the top of it: found in the
-//! article's text, fetched and shrunk in the background, and drawn by
-//! ratatui-image in whatever way the terminal can (iTerm2's images, Kitty's,
-//! Sixel, or else coloured half blocks).
+//! An article's pictures: found in its text, fetched and shrunk in the
+//! background, and drawn by ratatui-image in whatever way the terminal can
+//! (iTerm2's images, Kitty's, Sixel, or else coloured half blocks). The
+//! first is shown at the top of the article, the rest after the paragraph
+//! they're in.
 //!
-//! The story's document leaves room for it with `<!-- image: W H ROWS -->`
-//! (its size in pixels, and the most rows it may take), and the renderer
-//! works out how big it can be at the document's width.
+//! The story's document leaves room for each with `<!-- image: W H ROWS N -->`
+//! (its size in pixels, the most rows it may take, and which picture it is),
+//! and the renderer works out how big it can be at the document's width.
 
 use comrak::nodes::NodeValue;
 use comrak::{Arena, parse_document};
@@ -18,6 +19,7 @@ use ratatui::widgets::Widget;
 use ratatui_image::picker::{Picker, ProtocolType};
 use ratatui_image::sliced::{SignedPosition, SlicedImage, SlicedProtocol};
 use std::num::NonZeroU16;
+use std::ops::Range;
 use std::sync::OnceLock;
 
 /// Pictures smaller than this, either way, are icons and the like.
@@ -45,16 +47,31 @@ fn cell() -> (u16, u16) {
     CELL.get().copied().unwrap_or((10, 20))
 }
 
-/// The first picture in `md` worth showing: its address, and where it is in
-/// `md` so it can be taken out when it's shown at the top instead. SVGs are
-/// passed over: there's no drawing them.
-pub fn first(md: &str) -> Option<(String, std::ops::Range<usize>)> {
+/// Most pictures shown from one article.
+const MAX_PICTURES: usize = 20;
+
+/// A picture in an article's Markdown.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Found {
+    pub url: String,
+    /// Its `![…](…)`, to take out when it's shown.
+    pub at: Range<usize>,
+    /// Just after the top-level block it's in: where it's shown, since it
+    /// may be inside a link or a sentence.
+    pub after: usize,
+}
+
+/// The pictures in `md` worth showing, in order. SVGs are passed over:
+/// there's no drawing them.
+pub fn all(md: &str) -> Vec<Found> {
     let arena = Arena::new();
     let root = parse_document(&arena, md, &crate::render::options());
     let starts: Vec<usize> = std::iter::once(0)
         .chain(md.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
     let offset = |line: usize, col: usize| Some(starts.get(line.checked_sub(1)?)? + col.checked_sub(1)?);
+    let line_end = |line: usize| starts.get(line).copied().unwrap_or(md.len());
+    let mut found = Vec::new();
     for node in root.descendants() {
         let NodeValue::Image(link) = &node.data().value else {
             continue;
@@ -65,12 +82,26 @@ pub fn first(md: &str) -> Option<(String, std::ops::Range<usize>)> {
             continue;
         }
         let pos = node.data().sourcepos;
-        let start = offset(pos.start.line, pos.start.column)?;
-        let end = offset(pos.end.line, pos.end.column)? + 1;
-        let range = (end <= md.len() && md.get(start..end)?.starts_with("![")).then_some(start..end)?;
-        return Some((url, range));
+        let (Some(start), Some(end)) = (
+            offset(pos.start.line, pos.start.column),
+            offset(pos.end.line, pos.end.column).map(|e| e + 1),
+        ) else {
+            continue;
+        };
+        if end > md.len() || !md.get(start..end).is_some_and(|s| s.starts_with("![")) {
+            continue;
+        }
+        let block = node
+            .ancestors()
+            .find(|n| n.parent().is_some_and(|p| p.parent().is_none()))
+            .unwrap_or(node);
+        let after = line_end(block.data().sourcepos.end.line).max(end);
+        found.push(Found { url, at: start..end, after });
+        if found.len() == MAX_PICTURES {
+            break;
+        }
     }
-    None
+    found
 }
 
 /// Downloads a picture, to be decoded.
@@ -213,19 +244,21 @@ fn iterm_rows(
     Some(out)
 }
 
-/// Where a picture goes in a document: `<!-- image: W H ROWS -->`.
-pub fn marker(picture: &DynamicImage, rows: usize) -> String {
-    format!("<!-- image: {} {} {rows} -->", picture.width(), picture.height())
+/// Where a picture goes in a document: `<!-- image: W H ROWS N -->`, for
+/// the article's `N`th picture.
+pub fn marker(picture: &DynamicImage, rows: usize, index: usize) -> String {
+    format!("<!-- image: {} {} {rows} {index} -->", picture.width(), picture.height())
 }
 
-/// The size in pixels and most rows, from a marker.
-pub fn parse_marker(html: &str) -> Option<(u32, u32, usize)> {
+/// The size in pixels, most rows and which picture, from a marker.
+pub fn parse_marker(html: &str) -> Option<(u32, u32, usize, usize)> {
     let rest = html.trim().strip_prefix("<!-- image:")?.strip_suffix("-->")?;
     let mut numbers = rest.split_whitespace();
     let w = numbers.next()?.parse().ok()?;
     let h = numbers.next()?.parse().ok()?;
     let rows = numbers.next()?.parse().ok()?;
-    (w > 0 && h > 0).then_some((w, h, rows))
+    let index = numbers.next()?.parse().ok()?;
+    (w > 0 && h > 0).then_some((w, h, rows, index))
 }
 
 /// How many columns and rows a `w`×`h` picture takes, at most `cols` wide
@@ -248,21 +281,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn finds_the_first_picture_that_can_be_drawn() {
-        let md = "Intro.\n\n![a logo](https://x.com/logo.svg)\n\nText ![a photo](https://x.com/p.jpg?w=640) more.\n";
-        let (url, range) = first(md).unwrap();
-        assert_eq!(url, "https://x.com/p.jpg?w=640");
-        assert_eq!(&md[range], "![a photo](https://x.com/p.jpg?w=640)");
-        assert_eq!(first("No pictures."), None);
+    fn finds_the_pictures_that_can_be_drawn() {
+        let md = "Intro.\n\n![a logo](https://x.com/logo.svg)\n\nText ![a photo](https://x.com/p.jpg?w=640) more.\nStill it.\n\n[![linked](https://x.com/l.png)](https://x.com/)\n";
+        let found = all(md);
+        let urls: Vec<&str> = found.iter().map(|f| f.url.as_str()).collect();
+        assert_eq!(urls, ["https://x.com/p.jpg?w=640", "https://x.com/l.png"]);
+        assert_eq!(&md[found[0].at.clone()], "![a photo](https://x.com/p.jpg?w=640)");
+        // Shown after its paragraph, not in the middle of it.
+        assert!(md[..found[0].after].ends_with("Still it.\n"));
+        assert_eq!(&md[found[1].at.clone()], "![linked](https://x.com/l.png)");
+        assert_eq!(found[1].after, md.len());
+        assert!(all("No pictures.").is_empty());
         // Parentheses in the address, as some image servers use.
         let md = "![x](https://a.com/fit(1x2)/b.png)";
-        assert_eq!(&md[first(md).unwrap().1], md);
+        assert_eq!(&md[all(md)[0].at.clone()], md);
     }
 
     #[test]
     fn markers_say_the_size() {
-        assert_eq!(parse_marker("<!-- image: 800 600 12 -->"), Some((800, 600, 12)));
-        assert_eq!(parse_marker("<!-- image: 0 600 12 -->"), None);
+        assert_eq!(parse_marker("<!-- image: 800 600 12 3 -->"), Some((800, 600, 12, 3)));
+        assert_eq!(parse_marker("<!-- image: 0 600 12 0 -->"), None);
         assert_eq!(parse_marker("<!-- rule: x -->"), None);
     }
 
