@@ -19,6 +19,10 @@ use std::collections::VecDeque;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 
+/// Where articles are cached: numbered, so an article extracted the old way
+/// is extracted again when the way changes.
+const ARTICLES: &str = "article-2";
+
 /// Workers for HN's APIs, and for articles.
 const HN_WORKERS: usize = 8;
 const ARTICLE_WORKERS: usize = 6;
@@ -284,13 +288,13 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             send(Got::Figure(id, index, picture), true)
         }
         Job::Article(id, url) => {
-            if let Some(article) = cache.get("article", &id.to_string()) {
+            if let Some(article) = cache.get(ARTICLES, &id.to_string()) {
                 return send(Got::Article(id, article), true);
             }
             let article = article::fetch(&url);
             // What couldn't be read may be readable next time.
             if matches!(article, Article::Text { .. }) {
-                cache.put("article", &id.to_string(), &article);
+                cache.put(ARTICLES, &id.to_string(), &article);
             }
             send(Got::Article(id, article), true)
         }

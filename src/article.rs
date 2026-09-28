@@ -81,11 +81,11 @@ pub fn extract(html: &str, url: &str) -> Article {
         text_mode: TextMode::Markdown,
         ..Config::default()
     };
-    let html = unhide_streamed(html);
+    let html = tidy_emphasis(&unhide_streamed(html));
     let parsed = Readability::new(&*html, Some(url), Some(config)).and_then(|mut r| r.parse());
     match parsed {
         Ok(article) => {
-            let md = drop_metadata(article.text_content.trim());
+            let md = section_breaks(&drop_metadata(article.text_content.trim()));
             if md.is_empty() {
                 return Article::Unreadable("no article text found".into());
             }
@@ -106,6 +106,43 @@ fn unhide_streamed(html: &str) -> std::borrow::Cow<'_, str> {
     } else {
         html.into()
     }
+}
+
+/// Spaces just inside italics and bold moved outside: `<i>July. </i>Then`
+/// would be `*July. *Then` in Markdown, which isn't italics at all.
+fn tidy_emphasis(html: &str) -> String {
+    let mut html = html.to_string();
+    for tag in ["i", "em", "b", "strong"] {
+        let (open, close) = (format!("<{tag}>"), format!("</{tag}>"));
+        for space in [" ", "&nbsp;", "\u{a0}"] {
+            let (inside, outside) = (format!("{space}{close}"), format!("{close}{space}"));
+            while html.contains(&inside) {
+                html = html.replace(&inside, &outside);
+            }
+            let (inside, outside) = (format!("{open}{space}"), format!("{space}{open}"));
+            while html.contains(&inside) {
+                html = html.replace(&inside, &outside);
+            }
+        }
+    }
+    html
+}
+
+/// Paragraphs that are only a section break, as writers type them (`***`,
+/// `* * *`, `⁂`), marked as one, to be drawn as one.
+fn section_breaks(md: &str) -> String {
+    md.split("\n\n")
+        .map(|block| {
+            let marks: String = block.chars().filter(|c| !c.is_whitespace() && *c != '\\').collect();
+            let asterisks = marks.len() >= 3 && marks.chars().all(|c| c == '*');
+            if asterisks || marks == "⁂" {
+                crate::render::SECTION_BREAK
+            } else {
+                block
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 /// The article without the lines some pages open with about the page
@@ -195,6 +232,24 @@ mod tests {
         assert!(md.contains("reasonable length"));
         assert!(!md.contains("Home | About"), "{md}");
         assert!(words > 100);
+    }
+
+    #[test]
+    fn spaces_inside_emphasis_move_out() {
+        assert_eq!(
+            tidy_emphasis("<p><i>July 2019.  </i>Then <b> bold</b> and <em>fine</em></p>"),
+            "<p><i>July 2019.</i>  Then  <b>bold</b> and <em>fine</em></p>"
+        );
+    }
+
+    #[test]
+    fn section_breaks_are_marked() {
+        let md = "One.\n\n\\*\\*\\*\n\nTwo.\n\n\\* \\* \\*\n\n⁂\n\nThree *and* four.\n\n\\*\\*";
+        let brk = crate::render::SECTION_BREAK;
+        assert_eq!(
+            section_breaks(md),
+            format!("One.\n\n{brk}\n\nTwo.\n\n{brk}\n\n{brk}\n\nThree *and* four.\n\n\\*\\*")
+        );
     }
 
     /// As MUBI's Notebook sends it: the article streamed in hidden, and a

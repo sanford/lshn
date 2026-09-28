@@ -472,6 +472,13 @@ impl Renderer<'_> {
             self.labelled_rule(&label);
             return;
         }
+        if literal.trim() == SECTION_BREAK {
+            let mark = "*   *   *";
+            let pad = self.avail().saturating_sub(mark.len()) / 2;
+            self.emit(vec![Span::styled(format!("{}{mark}", " ".repeat(pad)), self.theme.dim())]);
+            self.gap();
+            return;
+        }
         if let Some((w, h, rows, index)) = crate::figure::parse_marker(literal) {
             // Blank lines for it to be drawn over.
             let (cols, rows) = crate::figure::cells(w, h, self.avail(), rows);
@@ -889,6 +896,10 @@ fn trim_end(spans: &mut Vec<Span<'static>>) {
     }
 }
 
+/// A break between sections, drawn as a centred `*   *   *`: smaller than
+/// a rule, which marks where the article ends.
+pub const SECTION_BREAK: &str = "<!-- section break -->";
+
 /// The label of a rule written as `<!-- rule: label -->`: Markdown's
 /// `---` can't carry one.
 pub fn rule_label(html: &str) -> Option<String> {
@@ -906,6 +917,11 @@ mod tests {
             .iter()
             .map(|l| l.text() + "\n")
             .collect()
+    }
+
+    #[test]
+    fn section_breaks_are_centred_asterisks() {
+        assert_eq!(plain(SECTION_BREAK, 15), "   *   *   *\n");
     }
 
     #[test]
