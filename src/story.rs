@@ -282,6 +282,9 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
     // Every comment in a bar, top-level ones too, so its header and text
     // read as one block.
     let bars = "> ".repeat(depth.min(MAX_DEPTH) + 1);
+    // So the reader knows which lines are which comment's.
+    md.push_str(&crate::render::comment_marker(c.id, depth.min(MAX_DEPTH)));
+    md.push_str("\n\n");
     for line in body.trim_end().lines() {
         md.push_str(bars.trim_end());
         if !line.is_empty() {

@@ -40,7 +40,8 @@ Reading:
 | `↑` `↓` `j` `k` | Scroll a line; `J` `K`, a page |
 | `Space` `b`, `d` `u`, `g` `G` | Page, half page; top, bottom |
 | `c` | To the comments, and back to where you were |
-| `]` `[` | Next and previous top-level comment (or heading, in the article) |
+| `]` `[` | Next and previous comment, replies included (or heading, in the article) |
+| `}` `{` | Next and previous thread: top-level comments only |
 | `o` `O` | The outline: the article's headings and each top-level comment |
 | `/` `n` `N` | Search the story; next and previous match |
 | `f` | Follow a link: type the letters drawn on it |
@@ -54,8 +55,8 @@ Anywhere:
 |---|---|
 | `w` `W` | Open the story's link, or its HN page, in the browser |
 | `y` `Y` | Copy the story's link, or its HN page |
-| `v` | Upvote: in the list, the selected story; reading, label the story and the comments on screen and type one's letters |
-| `r` | Reply, choosing what to the same way: write it in your editor, see it, then post it |
+| `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story |
+| `r` | Reply to the same: write it in your editor, see it, then post it |
 | `L` | Log in to HN, or out |
 | `R` | Reload |
 | `t` | Pick a color theme |
@@ -71,7 +72,7 @@ Every author's name is a link: follow it (`f`, or click) for their page — karm
 
 `v` and `r` act as you on HN, so the first time, `L` (or `v` or `r` themselves) asks you to log in. lshn keeps HN's session, never your password: in the system's keyring (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux) or, where there isn't one, in `~/.lshn/session`, encrypted with a passphrase you choose, and asked for once a run.
 
-Reading, `v` and `r` label the story and each comment on screen (by its age, which links to it, as on HN) for you to choose one. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
+Reading, the comment halfway down the screen is the one being read: its bars are drawn in the accent color, its own heavy, with `r reply · v upvote` beside its author, and the footer says who `r` would answer. Scrolling moves it along; `]` and `[` go to the next and previous comment, centring it, and `}` and `{` to the next and previous thread, skipping replies. `v` and `r` act on that comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
 ### What it remembers
 

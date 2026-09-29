@@ -29,6 +29,29 @@ pub struct Rendered {
     pub links: Vec<String>,
     /// Room left for pictures.
     pub figures: Vec<Figure>,
+    /// Where each comment starts, in order.
+    pub comments: Vec<CommentMark>,
+}
+
+/// Where a comment starts: its id, how deeply it's nested, and its first
+/// line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommentMark {
+    pub id: u64,
+    pub depth: usize,
+    pub line: usize,
+}
+
+/// What goes before a comment in a story's document, for the renderer to
+/// note where it starts: `<!-- comment: ID DEPTH -->`.
+pub fn comment_marker(id: u64, depth: usize) -> String {
+    format!("<!-- comment: {id} {depth} -->")
+}
+
+fn parse_comment_marker(html: &str) -> Option<(u64, usize)> {
+    let rest = html.trim().strip_prefix("<!-- comment:")?.strip_suffix("-->")?;
+    let (id, depth) = rest.trim().split_once(' ')?;
+    Some((id.parse().ok()?, depth.trim().parse().ok()?))
 }
 
 /// Where a picture goes: which of the article's it is, the line it starts
@@ -107,6 +130,8 @@ pub fn render(
         headings: Vec::new(),
         anchors: Anchorizer::new(),
         figures: Vec::new(),
+        pending_comment: None,
+        comments: Vec::new(),
     };
     for child in root.children() {
         let pos = child.data().sourcepos;
@@ -118,6 +143,7 @@ pub fn render(
         headings: r.headings,
         links: r.links.into_inner(),
         figures: r.figures,
+        comments: r.comments,
     }
 }
 
@@ -151,6 +177,9 @@ struct Renderer<'t> {
     headings: Vec<Heading>,
     anchors: Anchorizer,
     figures: Vec<Figure>,
+    /// A comment's marker, till its first line.
+    pending_comment: Option<(u64, usize)>,
+    comments: Vec<CommentMark>,
 }
 
 impl Renderer<'_> {
@@ -195,6 +224,10 @@ impl Renderer<'_> {
 
     fn emit(&mut self, spans: Vec<Span<'static>>) {
         self.flush_gap();
+        if let Some((id, depth)) = self.pending_comment.take() {
+            let line = self.out.len();
+            self.comments.push(CommentMark { id, depth, line });
+        }
         let mut line = Vec::new();
         for p in &mut self.prefix {
             line.extend(if p.used {
@@ -470,6 +503,10 @@ impl Renderer<'_> {
     fn html_block(&mut self, literal: &str) {
         if let Some(label) = rule_label(literal) {
             self.labelled_rule(&label);
+            return;
+        }
+        if let Some(comment) = parse_comment_marker(literal) {
+            self.pending_comment = Some(comment);
             return;
         }
         if literal.trim() == SECTION_BREAK {

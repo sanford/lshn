@@ -1470,7 +1470,10 @@ impl App {
             width = width.min(max);
         }
         let theme = Rc::clone(&self.theme);
+        // Reading, the comment `r` and `v` would act on stands out.
+        let focus = (self.focus == Focus::Reader).then(|| theme.heading(1));
         if let Some(doc) = self.current() {
+            doc.show_focus(focus);
             doc.draw(f, area, width, &theme);
         }
         self.draw_figure(f);
@@ -1489,6 +1492,15 @@ impl App {
             f.render_widget(Paragraph::new(Line::from(format!(" {msg}")).yellow()), area);
             return;
         }
+        // Who `r` would answer, reading.
+        let reply = match self.acting_on() {
+            Some(id) if self.stories.contains_key(&id) => "comment".to_string(),
+            Some(id) if self.focus == Focus::Reader => match self.said(id).0 {
+                who if who.is_empty() => "reply".to_string(),
+                who => format!("reply to {who}"),
+            },
+            _ => "reply".to_string(),
+        };
         let keys: Vec<(&str, &str)> = if self.outline_focus.is_some() {
             if self.outline_filter.is_some() {
                 vec![("↑↓", "move"), ("⏎", "read here"), ("esc", "clear")]
@@ -1528,8 +1540,8 @@ impl App {
                 }
                 Focus::Reader => vec![
                     ("↑↓", "scroll"),
-                    ("c", "comments"),
-                    ("]", "next comment"),
+                    ("c ] [", "comments"),
+                    ("r", reply.as_str()),
                     ("^j ^k", "next story"),
                     ("/", "search"),
                     ("f", "follow"),
@@ -1735,14 +1747,15 @@ fn draw_help(f: &mut Frame) {
         ("q", "Quit"),
         ("c", "To the comments, and back"),
         ("] [", "Next / previous comment (or heading)"),
+        ("} {", "Next / previous thread, skipping replies"),
         ("o", "Outline: the text follows as you move (/ filters)"),
         ("O", "Keep the outline open beside the story"),
         ("w W", "Open the story's link / its HN page in the browser"),
         ("y Y", "Copy the story's link / its HN page"),
         ("1-6", "Top, New, Best, Ask, Show, Jobs"),
         ("s", "Search all of HN's stories"),
-        ("v", "Upvote the story, or choose a comment on screen"),
-        ("r", "Reply to the story, or choose a comment on screen"),
+        ("v", "Upvote the comment being read (heavy bar), or the story"),
+        ("r", "Reply to the comment being read (heavy bar), or the story"),
         ("L", "Log in to HN, or out"),
         ("R", "Reload"),
         ("t", "Pick a color theme"),

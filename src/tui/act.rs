@@ -57,22 +57,33 @@ pub enum Passphrase {
 }
 
 impl App {
-    /// `v`: in the list, upvotes the selected story; reading, labels the
-    /// story and the comments on screen to choose one.
+    /// `v`: in the list, upvotes the selected story; reading, the comment
+    /// being read, or above the comments, the story.
     pub(super) fn upvote_key(&mut self) {
-        match self.selected_story_in_list() {
+        match self.selected_story_in_list().or_else(|| self.acting_on()) {
             Some(id) => self.upvote(id),
             None => self.show_hints(Purpose::Upvote),
         }
     }
 
-    /// `r`: in the list, replies to the selected story; reading, labels the
-    /// story and the comments on screen to choose one.
+    /// `r`: in the list, replies to the selected story; reading, to the
+    /// comment being read, or above the comments, the story.
     pub(super) fn reply_key(&mut self) {
-        match self.selected_story_in_list() {
+        match self.selected_story_in_list().or_else(|| self.acting_on()) {
             Some(id) => self.reply(id),
             None => self.show_hints(Purpose::Reply),
         }
+    }
+
+    /// What `r` and `v` act on while reading: the focused comment, or else
+    /// the story. `None` on someone's page, where there's no telling.
+    pub(super) fn acting_on(&mut self) -> Option<u64> {
+        let reader = self.focus == Focus::Reader || self.kept();
+        if reader && self.user_page.is_some() {
+            return None;
+        }
+        let (story, _) = self.current_key()?;
+        Some(self.current()?.focused().map_or(story, |c| c.id))
     }
 
     /// The selected story, when the list has the keyboard and it's what's
@@ -333,7 +344,7 @@ impl App {
 
     /// Who wrote item `id`, and what they said: a story's title, or a
     /// comment's text.
-    fn said(&self, id: u64) -> (String, String) {
+    pub(super) fn said(&self, id: u64) -> (String, String) {
         if let Some(s) = self.stories.get(&id) {
             return (s.by.clone(), s.title.clone());
         }

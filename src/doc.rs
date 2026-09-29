@@ -6,13 +6,13 @@
 //! line, so a 1-line table that renders as 10 lines, or a paragraph that
 //! wraps to 5, stays in place.
 
-use crate::render::{Figure, Heading, RLine, render};
+use crate::render::{CommentMark, Figure, Heading, RLine, render};
 use crate::theme::Theme;
 use crate::wrap;
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::path::PathBuf;
 
@@ -53,6 +53,13 @@ pub struct Doc {
     links: Vec<String>,
     /// Room left for pictures.
     figures: Vec<Figure>,
+    /// Each comment's own lines, not its replies'.
+    comments: Vec<CommentSpan>,
+    /// The comment moved to, while the view stays where that put it: the
+    /// last ones can't reach the reading line.
+    focus: Option<(usize, usize)>,
+    /// Whether the focused comment's bar is drawn heavy, and how.
+    focus_style: Option<Style>,
     search: Option<Search>,
     /// Link hints on screen, while choosing a link to follow.
     pub hints: Vec<Hint>,
@@ -90,6 +97,9 @@ impl Doc {
             headings: Vec::new(),
             links: Vec::new(),
             figures: Vec::new(),
+            comments: Vec::new(),
+            focus: None,
+            focus_style: None,
             search: None,
             hints: Vec::new(),
             pending_anchor: None,
@@ -165,6 +175,7 @@ impl Doc {
         self.headings = rendered.headings;
         self.links = rendered.links;
         self.figures = rendered.figures;
+        self.comments = comment_spans(&rendered.comments, &self.lines);
         self.width = width;
         if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
             self.find(&query);
@@ -359,11 +370,19 @@ impl Doc {
 
     /// Line `i` with any search matches on it highlighted.
     fn highlighted(&self, i: usize, line: &RLine) -> RLine {
+        let mut line = line.clone();
+        if let (Some(style), Some(c)) = (self.focus_style, self.focused())
+            && (c.start..c.end).contains(&i)
+        {
+            line.spans = focus_bars(line.spans, c.depth * 2, style);
+            if i == c.start {
+                line.spans.push(Span::styled("   r reply · v upvote", Style::new().dim()));
+            }
+        }
         let Some(search) = &self.search else {
-            return line.clone();
+            return line;
         };
         let first = search.matches.partition_point(|m| m.0 < i);
-        let mut line = line.clone();
         for (n, &(_, start, end)) in search.matches[first..]
             .iter()
             .take_while(|m| m.0 == i)
@@ -402,24 +421,81 @@ impl Doc {
     }
 
     /// Scrolls the rendered side so line `i` is at the top.
-    pub fn jump_to(&mut self, i: usize) {
-        self.top = i.min(self.max_top());
+    /// Halfway down the screen: the comment there is the one being read.
+    fn reading_line(&self) -> usize {
+        self.top + self.height / 2
     }
 
-    /// Jumps to the next heading below the top of the screen, or the
-    /// previous one above it. Returns false if there isn't one.
-    pub fn jump_heading(&mut self, forward: bool) -> bool {
-        let top = self.top;
-        let line = if forward {
-            self.headings.iter().map(|h| h.line).find(|&l| l > top)
+    fn focused_index(&self) -> Option<usize> {
+        if let Some((i, top)) = self.focus
+            && top == self.top
+            && i < self.comments.len()
+        {
+            return Some(i);
+        }
+        let reading = self.reading_line();
+        // The last to start at or above it; in the gap after one, still it.
+        let i = self.comments.partition_point(|c| c.start <= reading);
+        i.checked_sub(1)
+    }
+
+    /// The comment being read: at the reading line, or moved to.
+    pub fn focused(&self) -> Option<CommentSpan> {
+        self.focused_index().map(|i| self.comments[i])
+    }
+
+    /// Draws the focused comment's bar heavy, in `style`; or not, `None`.
+    pub fn show_focus(&mut self, style: Option<Style>) {
+        self.focus_style = style;
+    }
+
+    /// Moves to the next or previous heading or comment (only top-level
+    /// ones, unless `replies`), putting a comment at the reading line.
+    /// Returns false if there's none that way.
+    pub fn jump(&mut self, forward: bool, replies: bool) -> bool {
+        let focused = self.focused_index();
+        let from = focused.map_or(self.top, |i| self.comments[i].start);
+        let comments = self
+            .comments
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| replies || c.depth == 0)
+            .map(|(i, c)| (c.start, Some(i)));
+        // Top-level comments are headings too: one target each.
+        let headings = self
+            .headings
+            .iter()
+            .filter(|h| !self.comments.iter().any(|c| c.start == h.line))
+            .map(|h| (h.line, None));
+        let targets = comments.chain(headings);
+        let target = if forward {
+            targets.filter(|t| t.0 > from).min()
         } else {
-            self.headings
-                .iter()
-                .map(|h| h.line)
-                .rev()
-                .find(|&l| l < top)
+            targets.filter(|t| t.0 < from).max()
         };
-        line.map(|l| self.jump_to(l)).is_some()
+        match target {
+            Some((line, Some(i))) => {
+                // Centred, if it fits; if not, from its header down.
+                let rows = self.comments[i].end - line;
+                let top = if rows < self.height {
+                    (line + rows / 2).saturating_sub(self.height / 2)
+                } else {
+                    line.saturating_sub(1)
+                };
+                self.top = top.min(self.max_top());
+                self.focus = Some((i, self.top));
+                true
+            }
+            Some((line, None)) => {
+                self.jump_to(line);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn jump_to(&mut self, i: usize) {
+        self.top = i.min(self.max_top());
     }
 
     /// The line of the heading with anchor `slug`.
@@ -599,7 +675,17 @@ impl Doc {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
+        let before = self.top;
         self.top = self.top.saturating_add_signed(delta).min(self.max_top());
+        // At the end, the last comments can't come up to the reading line:
+        // scrolling on moves to them instead.
+        if self.top == before
+            && delta > 0
+            && let Some(i) = self.focused_index()
+            && i + 1 < self.comments.len()
+        {
+            self.focus = Some((i + 1, self.top));
+        }
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -654,6 +740,61 @@ fn floor(x: f64) -> usize {
     (x + 1e-9) as usize
 }
 
+/// A comment's own lines: from its first to its last with text, before
+/// its replies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CommentSpan {
+    pub id: u64,
+    pub depth: usize,
+    pub start: usize,
+    pub end: usize,
+}
+
+fn comment_spans(marks: &[CommentMark], lines: &[RLine]) -> Vec<CommentSpan> {
+    let blank = |l: &RLine| {
+        l.spans
+            .iter()
+            .flat_map(|s| s.content.chars())
+            .all(|c| c == '│' || c.is_whitespace())
+    };
+    marks
+        .iter()
+        .enumerate()
+        .map(|(n, m)| {
+            let mut end = marks.get(n + 1).map_or(lines.len(), |next| next.line);
+            while end > m.line + 1 && lines.get(end - 1).is_some_and(blank) {
+                end -= 1;
+            }
+            CommentSpan { id: m.id, depth: m.depth, start: m.line, end }
+        })
+        .collect()
+}
+
+/// `spans` with the quote bars up to column `last` in `style`, and the one
+/// there, the comment's own, drawn heavy.
+fn focus_bars(spans: Vec<Span<'static>>, last: usize, style: Style) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 4);
+    let mut col = 0;
+    for span in spans {
+        let mut plain = String::new();
+        for c in span.content.chars() {
+            if c == '│' && col <= last && col % 2 == 0 {
+                if !plain.is_empty() {
+                    out.push(Span::styled(std::mem::take(&mut plain), span.style));
+                }
+                out.push(Span::styled(if col == last { "┃" } else { "│" }, style));
+            } else {
+                plain.push(c);
+            }
+            col += wrap::width(c.encode_utf8(&mut [0; 4]));
+        }
+        if !plain.is_empty() {
+            out.push(Span::styled(plain, span.style));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +826,73 @@ mod tests {
         doc.layout(40, &theme);
         assert_eq!(doc.lines[doc.top].text(), "second comment");
         assert!(doc.top > second + 30);
+    }
+
+    /// A thread as a story's document has it: a top-level comment with a
+    /// reply, then another top-level one.
+    fn thread() -> Doc {
+        use crate::render::comment_marker;
+        let theme = Theme::plain();
+        let md = format!(
+            "# Story\n\n## Comments\n\n{}\n\n> ### bob\n>\n> first\n> line\n\n{}\n\n> > **alice**\n> >\n> > reply\n\n{}\n\n> ### carol\n>\n> second\n",
+            comment_marker(1, 0),
+            comment_marker(2, 1),
+            comment_marker(3, 0),
+        );
+        let mut doc = Doc::new(md);
+        doc.layout(40, &theme);
+        doc.height = 4;
+        doc
+    }
+
+    #[test]
+    fn knows_each_comments_own_lines() {
+        let doc = thread();
+        let text = |c: &CommentSpan| -> Vec<String> { doc.lines[c.start..c.end].iter().map(|l| l.text()).collect() };
+        let spans = &doc.comments;
+        assert_eq!(spans.iter().map(|c| (c.id, c.depth)).collect::<Vec<_>>(), [(1, 0), (2, 1), (3, 0)]);
+        assert_eq!(text(&spans[0]), ["│ bob", "│", "│ first line"]);
+        assert_eq!(text(&spans[1]), ["│ │ alice", "│ │", "│ │ reply"]);
+    }
+
+    #[test]
+    fn moves_between_comments_and_focuses_them() {
+        let mut doc = thread();
+        // Above the comments: nothing's focused.
+        assert_eq!(doc.focused(), None);
+        // ] goes to the Comments heading, then each comment.
+        assert!(doc.jump(true, true));
+        assert_eq!(doc.focused(), None);
+        assert!(doc.jump(true, true));
+        assert_eq!(doc.focused().map(|c| c.id), Some(1));
+        assert!(doc.jump(true, true));
+        assert_eq!(doc.focused().map(|c| c.id), Some(2));
+        // } skips replies; { comes back to the top-level one before.
+        assert!(doc.jump(true, false));
+        assert_eq!(doc.focused().map(|c| c.id), Some(3));
+        assert!(doc.jump(false, false));
+        assert_eq!(doc.focused().map(|c| c.id), Some(1));
+        // Scrolling, the focus follows the reading line again.
+        doc.scroll_by(1);
+        assert!(doc.focused().is_some());
+    }
+
+    #[test]
+    fn the_focused_comments_bars_stand_out() {
+        let accent = Style::new().bold();
+        let spans = vec![Span::raw("│ "), Span::raw("│ "), Span::raw("reply │ not a bar")];
+        let focused = focus_bars(spans, 2, accent);
+        let text: String = focused.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(text, "│ ┃ reply │ not a bar");
+        // Both bars in the accent; nothing in the text.
+        let styled: Vec<&str> = focused.iter().filter(|s| s.style == accent).map(|s| s.content.as_ref()).collect();
+        assert_eq!(styled, ["│", "┃"]);
+        // A top-level comment's: only its own, even with more drawn.
+        let text: String = focus_bars(vec![Span::raw("│ │ x")], 0, accent)
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(text, "┃ │ x");
     }
 
     #[test]

@@ -88,10 +88,13 @@ impl App {
                     self.flash = Some("No search (/ to search)".into());
                 }
             }
-            KeyCode::Char(c @ (']' | '[')) => {
-                if !doc.jump_heading(c == ']') {
-                    let which = if c == ']' { "below" } else { "above" };
-                    self.flash = Some(format!("No heading {which}"));
+            // To the next comment, or heading; with a brace, skipping
+            // replies.
+            KeyCode::Char(c @ (']' | '[' | '}' | '{')) => {
+                let forward = matches!(c, ']' | '}');
+                if !doc.jump(forward, matches!(c, ']' | '[')) {
+                    let which = if forward { "below" } else { "above" };
+                    self.flash = Some(format!("Nothing {which}"));
                 }
             }
             // The outline pane, just while choosing: the document follows
