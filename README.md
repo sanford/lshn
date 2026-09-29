@@ -4,7 +4,7 @@
 
 `lshn` shows HN's front page on the left and the selected story on the right: its title, the article it links to (pulled out of the page the way a browser's reader mode does), and then its comments, threaded. Holding `↓` shows each story as fast as your keyboard repeats, because the stories around the one you're on are fetched before you get to them.
 
-![lshn: the front page on the left, and the selected story's article on the right](docs/screenshot.png)
+![lshn: the front page on the left, and the selected story on the right: its title drawn big, the article's picture, and its text](docs/screenshot.png)
 
 ## Install
 
@@ -111,6 +111,8 @@ Every author's name is a link: follow it (`f`, or click) for their page — karm
 
 In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `F` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
+![Reading a story's comments full screen: threads in bars, and the selected comment on a band, with r reply · v upvote · space fold beside its author](docs/comments.png)
+
 ### Replies to you
 
 `i` shows the replies to your latest 30 comments and stories, newest first, each with what it answers. The header says when there are new ones (`i 3 new replies`), checked when lshn starts; they're marked `new` on the page, and aren't new any more once you've seen it. As in a thread, `j` and `k` go from one to the next, and `r` and `v` reply to the one selected or upvote it; its age is a link to it in its story.
@@ -154,6 +156,10 @@ user = "you"            # whose replies i shows, without logging in
 ```
 
 `lshn --edit-config` opens it in your editor, starting one with every setting listed, and says if what you saved can't be read. `--config FILE` reads another file instead.
+
+`amber` is `hn` in amber, and like it, keeps your terminal's background. Here with the copy menu open over the comments:
+
+![lshn in the amber theme, with the copy menu open: the story's link, its HN page, a Markdown link, the comment, the comment's link, the article, or a selection](docs/amber.png)
 
 Themes of your own go in `~/.lshn/themes/`, as `NAME.toml` or `NAME/colors.toml` in [Omarchy's](https://omarchy.org) `colors.toml` format, and are listed with the others.
 
