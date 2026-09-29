@@ -24,7 +24,7 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style, Stylize};
+use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
@@ -76,6 +76,9 @@ pub struct Settings {
     /// Your username, from the config, for the replies to you.
     pub user: Option<String>,
 }
+
+/// A symbol no cell drawn has: see `frame`.
+const NOT_ON_SCREEN: &str = "\u{FFFF}";
 
 /// The replies to you, shown in the reader in place of someone's page: not
 /// a username, which has no spaces.
@@ -164,6 +167,12 @@ fn picker() -> Option<Picker> {
         ..QueryStdioOptions::default()
     })
     .ok()?;
+    // A terminal that names itself in TERM is that one: Kitty, say,
+    // started from iTerm2 inherits iTerm2's TERM_PROGRAM and LC_TERMINAL.
+    // What it said it can do stands.
+    if own_term() {
+        return Some(picker);
+    }
     // Which terminal this is. iTerm2's variables outlive it: a terminal
     // started from iTerm2 (Terminal.app, say) inherits its LC_TERMINAL, so
     // that only counts when nothing else says (over ssh, say).
@@ -184,6 +193,14 @@ fn picker() -> Option<Picker> {
         return None;
     }
     Some(picker)
+}
+
+/// Whether the terminal says which it is in TERM, or as Kitty does, a
+/// variable of its own: then TERM_PROGRAM may be another's, inherited.
+fn own_term() -> bool {
+    let term = std::env::var("TERM").unwrap_or_default();
+    ["kitty", "ghostty", "wezterm"].iter().any(|t| term.contains(t))
+        || std::env::var_os("KITTY_WINDOW_ID").is_some()
 }
 
 /// Terminals that draw iTerm2's pictures, by what they call themselves in
@@ -527,17 +544,19 @@ impl App {
     /// titles have moved, draws it again from scratch, since the terminal
     /// clears the whole of one when any of it is written over.
     fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        use ratatui::crossterm::terminal::{
-            BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate,
-        };
+        use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
         use ratatui::crossterm::{execute, queue};
         queue!(io::stdout(), BeginSynchronizedUpdate)?;
         terminal.draw(|f| self.draw(f))?;
         if std::mem::take(&mut self.redraw) {
-            // Not terminal.clear(), which asks the terminal where the cursor
-            // is: a wait for its answer, every time, over ssh. Swapping
-            // leaves both buffers blank, so everything's drawn.
-            queue!(io::stdout(), Clear(ClearType::All))?;
+            // Every cell again, but without clearing the screen: that would
+            // take Kitty's pictures with it, which are sent only once. What
+            // ratatui takes to be on screen is made something that never
+            // is, so nothing is left out as unchanged.
+            terminal.swap_buffers();
+            for cell in &mut terminal.current_buffer_mut().content {
+                cell.set_symbol(NOT_ON_SCREEN);
+            }
             terminal.swap_buffers();
             terminal.draw(|f| self.draw(f))?;
         }
@@ -545,14 +564,16 @@ impl App {
         Ok(())
     }
 
-    /// Gives the terminal back as it was while `f` runs, then takes it again.
-    fn hand_over<T>(&self, terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
+    /// Gives the terminal back as it was while `f` runs, then takes it
+    /// again. Its pictures are gone with the screen: they're sent again.
+    fn hand_over<T>(&mut self, terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
         set_mouse(self.mouse_on, false);
         ratatui::restore();
         let result = f();
         *terminal = ratatui::init();
         set_mouse(self.mouse_on, true);
         terminal.clear()?;
+        self.drawn.clear();
         Ok(result)
     }
 
@@ -1757,18 +1778,15 @@ impl App {
         }
     }
 
-    /// The selected story's highlight: full while the list has the
-    /// keyboard, and softer (the code blocks' tint) while the story beside
-    /// it does, so the eye goes where the keys will.
-    /// The selected story: its title bright, even once it's been read, on
-    /// a slightly raised background. Reversed, with no colors to raise it
-    /// with.
+    /// The selected story: its title in the light orange of what's
+    /// highlighted, even once it's been read. Reversed, with no colors.
     fn list_highlight(&self) -> Style {
-        let raised = match self.theme.code_bg {
-            Some(bg) => Style::new().bg(bg),
-            None => Style::new().add_modifier(Modifier::REVERSED),
+        let style = if self.theme.color {
+            Style::new().fg(Color::Yellow)
+        } else {
+            Style::new().add_modifier(Modifier::REVERSED)
         };
-        raised.remove_modifier(Modifier::DIM)
+        style.remove_modifier(Modifier::DIM)
     }
 
     /// Stories in this list that won't be shown.
