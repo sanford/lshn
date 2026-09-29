@@ -1,6 +1,6 @@
 //! Omarchy's themes, bundled so they can be picked anywhere. Each is the
 //! theme's `colors.toml`, as Omarchy ships it (MIT: see `themes/LICENSE`);
-//! and lshn's own, `hn`, in the same form.
+//! and lshn's own, `hn` and `amber`, in the same form.
 //!
 //! Themes of your own go in `~/.lshn/themes/`, in the same format: as
 //! `NAME.toml`, or as a folder `NAME/` with a `colors.toml` in it, like an
@@ -19,6 +19,7 @@ macro_rules! themes {
 }
 
 themes!(
+    "amber",
     "catppuccin",
     "catppuccin-latte",
     "ethereal",
@@ -47,11 +48,14 @@ themes!(
 /// The theme lshn starts with, unless another's chosen.
 pub const DEFAULT: &str = "hn";
 
+/// lshn's own themes: HN's orange, and the same in amber.
+const OWN: &[&str] = &[DEFAULT, "amber"];
+
 /// Whether a theme paints the whole screen its background, rather than
-/// leaving the terminal's: all but lshn's own, which keeps the contrast
-/// the terminal has.
+/// leaving the terminal's: all but lshn's own, which keep the contrast the
+/// terminal has.
 pub fn paints_background(name: &str) -> bool {
-    name != DEFAULT
+    !OWN.contains(&name)
 }
 
 /// The user's themes, and what was wrong with those that couldn't be read.

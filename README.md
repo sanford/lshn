@@ -140,7 +140,7 @@ Everything a story or comment says is treated as text: none of it can become for
 `~/.lshn/config.toml`, all optional:
 
 ```toml
-theme = "tokyo-night"   # hn (the default: HN's orange), auto, dark, light, or one of Omarchy's themes
+theme = "tokyo-night"   # hn (the default: HN's orange), amber, auto, dark, light, or one of Omarchy's themes
 width = 100             # wrap text at 100 columns
 feed = "best"           # the list to start with
 mouse = false           # leave the mouse to the terminal
