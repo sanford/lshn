@@ -4,8 +4,6 @@
 
 `lshn` shows HN's front page on the left and the selected story on the right: its title, the article it links to (pulled out of the page the way a browser's reader mode does), and then its comments, threaded. Holding `↓` shows each story as fast as your keyboard repeats, because the stories around the one you're on are fetched before you get to them.
 
-It's [`lsmd`](https://github.com/sanford/lsmd)'s reader, pointed at Hacker News: the same keys, search, outline, link hints and color themes.
-
 ## Usage
 
 ```sh
