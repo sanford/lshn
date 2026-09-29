@@ -37,8 +37,9 @@ Reading:
 
 | Key | |
 |---|---|
-| `↑` `↓` `j` `k` | Scroll a line; `J` `K`, a page |
-| `Space` `b`, `d` `u`, `g` `G` | Page, half page; top, bottom |
+| `↑` `↓` `j` `k` | Scroll two lines (`scroll` in the settings); in the comments, go comment to comment. `J` `K`, a page |
+| `Space` `b`, `d` `u`, `g` `G` | Page, half page; top, bottom. On a comment, `Space` folds it |
+| `C` `E` | Fold every thread to a line; unfold everything |
 | `c` | To the comments, and back to where you were |
 | `]` `[` | Next and previous comment, replies included (or heading, in the article) |
 | `}` `{` | Next and previous thread: top-level comments only |
@@ -72,7 +73,7 @@ Every author's name is a link: follow it (`f`, or click) for their page — karm
 
 `v` and `r` act as you on HN, so the first time, `L` (or `v` or `r` themselves) asks you to log in. lshn keeps HN's session, never your password: in the system's keyring (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux) or, where there isn't one, in `~/.lshn/session`, encrypted with a passphrase you choose, and asked for once a run.
 
-Reading, the comment halfway down the screen is the one being read: its bars are drawn in the accent color, its own heavy, with `r reply · v upvote` beside its author, and the footer says who `r` would answer. Scrolling moves it along; `]` and `[` go to the next and previous comment, centring it, and `}` and `{` to the next and previous thread, skipping replies. `v` and `r` act on that comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
+In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `C` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
 ### What it remembers
 
@@ -95,11 +96,12 @@ Everything a story or comment says is treated as text: none of it can become for
 `~/.lshn/config.toml`, all optional:
 
 ```toml
-theme = "tokyo-night"   # auto, dark, light, or one of Omarchy's themes
+theme = "tokyo-night"   # hn (the default: HN's orange), auto, dark, light, or one of Omarchy's themes
 width = 100             # wrap text at 100 columns
 feed = "best"           # the list to start with
 mouse = false           # leave the mouse to the terminal
 outline = true          # show the outline beside stories
+scroll = 1              # lines j and k scroll (default 2)
 images = false          # don't show articles' first pictures
 mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
                                   # or with these words or phrases in their titles

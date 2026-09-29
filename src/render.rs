@@ -736,8 +736,11 @@ impl Renderer<'_> {
             NodeValue::SpoileredText => self.inline_children(node, styled(Modifier::DIM), out),
             NodeValue::Link(link) => {
                 let url = link.url.as_str();
+                // A title of "muted" is a hint to show it so.
                 let link_style = if self.broken(url) {
                     theme.broken_link()
+                } else if link.title == "muted" {
+                    theme.muted()
                 } else {
                     theme.link()
                 };

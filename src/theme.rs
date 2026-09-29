@@ -89,6 +89,8 @@ pub struct Theme {
     /// syntax theme.
     pub syntax: Option<SyntaxTheme>,
     paint: Option<Paint>,
+    /// A bundled theme's accent, for the panes' borders.
+    pub frame: Option<Color>,
 }
 
 impl Theme {
@@ -111,6 +113,7 @@ impl Theme {
             code_bg: None,
             syntax: None,
             paint: None,
+            frame: None,
         };
         if let Some(p) = palette {
             let bg = p.lighter_background();
@@ -136,13 +139,20 @@ impl Theme {
             code_bg: None,
             syntax: None,
             paint: None,
+            frame: None,
         }
     }
 
     /// The theme for `choice`, outside Omarchy.
     pub fn chosen(choice: Choice, color: bool) -> Theme {
         match choice {
-            Choice::Named(name) => Theme::painted(&palettes::palette(name), color),
+            Choice::Named(name) => {
+                let mut theme = Theme::painted(&palettes::palette(name), color);
+                if let Some(paint) = theme.paint.as_mut().filter(|_| !palettes::paints_background(name)) {
+                    paint.bg = Color::Reset;
+                }
+                theme
+            }
             Choice::Mode(mode) => Theme::new(mode, color, None),
         }
     }
@@ -151,12 +161,15 @@ impl Theme {
     pub fn painted(palette: &Palette, color: bool) -> Theme {
         let mut theme = Theme::new(Mode::Auto, color, Some(palette));
         if color {
+            let accent = palette.accent();
+            theme.frame = Some(theme.rgb(accent.r, accent.g, accent.b));
             let rgb = |c: omarchy_theme::Rgb| theme.rgb(c.r, c.g, c.b);
             theme.paint = Some(Paint {
                 ansi: std::array::from_fn(|i| rgb(palette.ansi(i as u8))),
                 fg: rgb(palette.foreground()),
                 bg: rgb(palette.background()),
             });
+
         }
         theme
     }
@@ -212,6 +225,11 @@ impl Theme {
         self.s(Style::new()
             .fg(Color::Blue)
             .add_modifier(Modifier::UNDERLINED))
+    }
+
+    /// What's secondary: who, when, how many comments.
+    pub fn muted(&self) -> Style {
+        self.s(Style::new().fg(Color::DarkGray))
     }
 
     pub fn broken_link(&self) -> Style {

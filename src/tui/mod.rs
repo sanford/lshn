@@ -55,6 +55,8 @@ pub struct Settings {
     pub mouse: bool,
     /// Open stories with the outline pane beside them.
     pub outline: bool,
+    /// How many lines `j` and `k` scroll.
+    pub scroll: usize,
     /// Show articles' first pictures.
     pub images: bool,
     /// The theme asked for, by flag or config.
@@ -88,6 +90,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     app.omarchy = settings.omarchy;
     app.mouse_on = settings.mouse;
     app.outline_pane = settings.outline;
+    app.scroll = settings.scroll;
     app.mute = settings.mute;
     app.open_feed(settings.feed);
     let mut terminal = ratatui::init();
@@ -210,6 +213,8 @@ struct App {
     figures: HashMap<(u64, usize), DynamicImage>,
     /// Stories whose every picture has been asked for, not just the first.
     pictured: HashSet<u64>,
+    /// Comments folded to their header, by id.
+    folded: HashSet<u64>,
     /// How the terminal draws pictures, once asked; `None` if it isn't to.
     picker: Option<Picker>,
     /// The story's pictures made ready to draw, by story, picture, columns
@@ -272,6 +277,8 @@ struct App {
     before_comments: HashMap<DocKey, usize>,
     /// Show the outline pane beside the story while reading.
     outline_pane: bool,
+    /// How many lines `j` and `k` scroll.
+    scroll: usize,
     /// Where the outline pane's rows were drawn (empty when it isn't shown).
     outline_area: Rect,
     outline_list: ListState,
@@ -317,6 +324,7 @@ impl App {
             articles: HashMap::new(),
             figures: HashMap::new(),
             pictured: HashSet::new(),
+            folded: HashSet::new(),
             picker: None,
             drawn: HashMap::new(),
             figure_at: None,
@@ -350,6 +358,7 @@ impl App {
             body_width: 0,
             before_comments: HashMap::new(),
             outline_pane: false,
+            scroll: 2,
             outline_area: Rect::default(),
             outline_list: ListState::default(),
             outline_focus: None,
@@ -694,7 +703,8 @@ impl App {
             None => self.seen.stories.get(&id).map(|s| s.newest),
         };
         let pictures = |i| self.figures.get(&(id, i));
-        story::markdown(story, self.articles.get(&id), comments, preview, now(), seen, &pictures)
+        let marks = story::Marks { seen, folded: &self.folded };
+        story::markdown(story, self.articles.get(&id), comments, preview, now(), marks, &pictures)
     }
 
     /// Brings a story's documents up to date with what's been fetched.
@@ -737,6 +747,32 @@ impl App {
         }
         let key = self.current_key()?;
         Some(self.doc(key))
+    }
+
+    /// The comment the cursor's on, reading a story.
+    fn cursor_comment(&mut self) -> Option<u64> {
+        if self.user_page.is_some() && (self.focus == Focus::Reader || self.kept()) {
+            return None;
+        }
+        self.current()?.focused().map(|c| c.id)
+    }
+
+    fn toggle_fold(&mut self, id: u64) {
+        if !self.folded.remove(&id) {
+            self.folded.insert(id);
+        }
+        if let Some((story, _)) = self.current_key() {
+            self.rebuild(story);
+        }
+    }
+
+    /// Every top-level comment folded: the threads, one line each.
+    fn fold_threads(&mut self) {
+        let Some((story, _)) = self.current_key() else { return };
+        if let Some(Ok(comments)) = self.threads.get(&story) {
+            self.folded.extend(comments.iter().map(|c| c.id));
+        }
+        self.rebuild(story);
     }
 
     /// Re-filters the list, keeping the same story selected.
@@ -1125,6 +1161,25 @@ impl App {
                 self.list_in_reader = !self.list_in_reader;
                 return false;
             }
+            // On a comment, Space folds it; `C` and `E` fold every thread
+            // and unfold everything.
+            KeyCode::Char(' ') if self.cursor_comment().is_some() => {
+                if let Some(id) = self.cursor_comment() {
+                    self.toggle_fold(id);
+                }
+                return false;
+            }
+            KeyCode::Char('C') => {
+                self.fold_threads();
+                return false;
+            }
+            KeyCode::Char('E') => {
+                if let Some((story, _)) = self.current_key() {
+                    self.folded.clear();
+                    self.rebuild(story);
+                }
+                return false;
+            }
             // What ↑ and ↓ do in the list: the next and previous story.
             // ⌃J ⌃K keep your hands on the home row.
             KeyCode::Down if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
@@ -1145,6 +1200,7 @@ impl App {
             }
             _ => {}
         }
+        let lines = self.scroll;
         let Some(doc) = self.current() else {
             return false;
         };
@@ -1157,8 +1213,9 @@ impl App {
             KeyCode::Char('u') if ctrl => doc.scroll_by(-half),
             KeyCode::Char('f') if ctrl => doc.scroll_by(page),
             KeyCode::Char('b') if ctrl => doc.scroll_by(-page),
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => doc.scroll_by(1),
-            KeyCode::Char('k') | KeyCode::Up => doc.scroll_by(-1),
+            // By line in the article, by comment in the comments.
+            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => doc.step(true, lines),
+            KeyCode::Char('k') | KeyCode::Up => doc.step(false, lines),
             KeyCode::Char('d') => doc.scroll_by(half),
             KeyCode::Char('u') => doc.scroll_by(-half),
             KeyCode::Char(' ') | KeyCode::PageDown => doc.scroll_by(page),
@@ -1294,12 +1351,10 @@ impl App {
     }
 
     fn pane(&self, title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
-        let block = Block::bordered().title(title);
-        if focused {
-            block
-        } else {
-            block.border_style(Style::new().dim())
-        }
+        // In the theme's accent, if it has one; dim without the keyboard.
+        let border = self.theme.frame.map_or(Style::new(), |c| Style::new().fg(c));
+        let border = if focused { border } else { border.dim() };
+        Block::bordered().title(title).border_style(border)
     }
 
     fn draw_list(&mut self, f: &mut Frame, area: Rect) {
@@ -1361,15 +1416,15 @@ impl App {
     /// The selected story's highlight: full while the list has the
     /// keyboard, and softer (the code blocks' tint) while the story beside
     /// it does, so the eye goes where the keys will.
+    /// The selected story: its title bright, even once it's been read, on
+    /// a slightly raised background. Reversed, with no colors to raise it
+    /// with.
     fn list_highlight(&self) -> Style {
-        let reversed = Style::new().add_modifier(Modifier::REVERSED);
-        if self.focus == Focus::List {
-            return reversed;
-        }
-        match self.theme.code_bg {
-            Some(_) => self.theme.code_block(),
-            None => reversed.add_modifier(Modifier::DIM),
-        }
+        let raised = match self.theme.code_bg {
+            Some(bg) => Style::new().bg(bg),
+            None => Style::new().add_modifier(Modifier::REVERSED),
+        };
+        raised.remove_modifier(Modifier::DIM)
     }
 
     /// Stories in this list that won't be shown.
@@ -1471,7 +1526,10 @@ impl App {
         }
         let theme = Rc::clone(&self.theme);
         // Reading, the comment `r` and `v` would act on stands out.
-        let focus = (self.focus == Focus::Reader).then(|| theme.heading(1));
+        let focus = (self.focus == Focus::Reader).then(|| crate::doc::FocusStyle {
+            accent: theme.heading(1),
+            band: theme.code_bg,
+        });
         if let Some(doc) = self.current() {
             doc.show_focus(focus);
             doc.draw(f, area, width, &theme);
@@ -1739,7 +1797,7 @@ fn char_width(c: char) -> usize {
 
 fn draw_help(f: &mut Frame) {
     const KEYS: &[(&str, &str)] = &[
-        ("↑↓ j k", "Move / scroll"),
+        ("↑↓ j k", "Move / scroll; in the comments, comment by comment"),
         ("⏎ → l", "Read the selected story full screen"),
         ("tab", "Between the list and the story (both stay, if there's room)"),
         ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
@@ -1748,14 +1806,16 @@ fn draw_help(f: &mut Frame) {
         ("c", "To the comments, and back"),
         ("] [", "Next / previous comment (or heading)"),
         ("} {", "Next / previous thread, skipping replies"),
+        ("space", "On a comment: fold it and its replies, or unfold"),
+        ("C E", "Fold every thread to one line / unfold everything"),
         ("o", "Outline: the text follows as you move (/ filters)"),
         ("O", "Keep the outline open beside the story"),
         ("w W", "Open the story's link / its HN page in the browser"),
         ("y Y", "Copy the story's link / its HN page"),
         ("1-6", "Top, New, Best, Ask, Show, Jobs"),
         ("s", "Search all of HN's stories"),
-        ("v", "Upvote the comment being read (heavy bar), or the story"),
-        ("r", "Reply to the comment being read (heavy bar), or the story"),
+        ("v", "Upvote the selected comment, or above the comments, the story"),
+        ("r", "Reply to the selected comment, or above the comments, the story"),
         ("L", "Log in to HN, or out"),
         ("R", "Reload"),
         ("t", "Pick a color theme"),

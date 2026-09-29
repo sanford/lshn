@@ -97,7 +97,8 @@ fn run(args: Args) -> io::Result<()> {
     let choice = args
         .theme
         .or(config.theme)
-        .unwrap_or(Choice::Mode(Mode::Auto));
+        // Hacker News's own orange, unless asked otherwise.
+        .unwrap_or(Choice::Named(palettes::DEFAULT));
     let color = !no_color && !args.plain;
     // On Omarchy the desktop's theme wins, unless code is asked to be
     // plain dark or light.
@@ -124,6 +125,7 @@ fn run(args: Args) -> io::Result<()> {
         max_width: width,
         mouse: !args.no_mouse && config.mouse.unwrap_or(true),
         outline: config.outline.unwrap_or(false),
+        scroll: config.scroll.unwrap_or(2).max(1),
         images: config.images.unwrap_or(true),
         choice,
         omarchy: palette.is_some(),
@@ -173,7 +175,7 @@ fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let md = story::markdown(&story, article.as_ref(), comments, false, now, None, &|_| None);
+    let md = story::markdown(&story, article.as_ref(), comments, false, now, story::Marks { seen: None, folded: &Default::default() }, &|_| None);
     let mut lines = render::render(&md, width, theme, None, None).lines;
     for span in lines.iter_mut().flat_map(|l| &mut l.spans) {
         span.style = theme.recolor(span.style);

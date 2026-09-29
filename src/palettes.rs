@@ -1,5 +1,6 @@
 //! Omarchy's themes, bundled so they can be picked anywhere. Each is the
-//! theme's `colors.toml`, as Omarchy ships it (MIT: see `themes/LICENSE`).
+//! theme's `colors.toml`, as Omarchy ships it (MIT: see `themes/LICENSE`);
+//! and lshn's own, `hn`, in the same form.
 
 use omarchy_theme::Palette;
 
@@ -19,6 +20,7 @@ themes!(
     "flexoki-light",
     "gruvbox",
     "hackerman",
+    "hn",
     "kanagawa",
     "last-horizon",
     "lumon",
@@ -35,6 +37,16 @@ themes!(
     "vantablack",
     "white",
 );
+
+/// The theme lshn starts with, unless another's chosen.
+pub const DEFAULT: &str = "hn";
+
+/// Whether a theme paints the whole screen its background, rather than
+/// leaving the terminal's: all but lshn's own, which keeps the contrast
+/// the terminal has.
+pub fn paints_background(name: &str) -> bool {
+    name != DEFAULT
+}
 
 pub fn names() -> impl Iterator<Item = &'static str> {
     THEMES.iter().map(|(name, _)| *name)

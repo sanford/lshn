@@ -7,6 +7,7 @@
 
 use crate::article::{self, Article};
 use crate::figure;
+use std::collections::HashSet;
 use std::ops::Range;
 use crate::hn::{self, Comment, Story, User};
 
@@ -25,18 +26,27 @@ pub enum Comments<'a> {
 /// The heading that starts the comments, which `c` jumps to.
 pub const COMMENTS_HEADING: &str = "Comments";
 
+/// What the reader has done to a thread: the newest comment they'd seen
+/// before (newer ones are marked new), and what they've folded.
+#[derive(Clone, Copy)]
+pub struct Marks<'a> {
+    pub seen: Option<u64>,
+    pub folded: &'a HashSet<u64>,
+}
+
 /// The story's document. `article` is `None` while it's still coming;
 /// `preview` shortens a long article, for the list's preview pane.
-/// Comments newer than `seen` (the newest one seen before) are marked new.
+/// `marks` say which comments are new, and which folded.
 pub fn markdown(
     story: &Story,
     article: Option<&Article>,
     comments: Comments,
     preview: bool,
     now: u64,
-    seen: Option<u64>,
+    marks: Marks,
     pictures: Pictures,
 ) -> String {
+    let Marks { seen, folded } = marks;
     let mut md = String::new();
     md.push_str(&format!("# {}\n\n", escape(&story.title)));
     md.push_str(&details(story, now));
@@ -77,6 +87,7 @@ pub fn markdown(
                 op: &story.by,
                 now,
                 seen,
+                folded,
             };
             for c in comments {
                 comment(&mut md, c, 0, &context);
@@ -86,23 +97,23 @@ pub fn markdown(
     md
 }
 
-/// "example.com · 412 points · alice · 3h ago · 187 comments"
+/// "example.com · 412 points · alice · 3h ago · 187 comments": where it's
+/// from stands out, the rest is muted.
 fn details(story: &Story, now: u64) -> String {
+    let hn_page = story.hn_url();
     let mut parts = Vec::new();
     if let (Some(url), Some(domain)) = (&story.url, story.domain()) {
         parts.push(format!("[{}](<{}>)", escape(&domain), link_target(url)));
     }
-    parts.push(format!("{} points", story.score));
-    if !story.by.is_empty() {
-        parts.push(author(&story.by));
+    parts.push(format!("[{} points](<{hn_page}> \"muted\")", story.score));
+    if hn::is_username(&story.by) {
+        parts.push(format!("[{}](<{}> \"muted\")", escape(&story.by), hn::user_url(&story.by)));
+    } else if !story.by.is_empty() {
+        parts.push(escape(&story.by));
     }
-    parts.push(ago(story.time, now));
+    parts.push(format!("[{}](<{hn_page}> \"muted\")", ago(story.time, now)));
     let s = if story.descendants == 1 { "" } else { "s" };
-    parts.push(format!(
-        "[{} comment{s}](<{}>)",
-        story.descendants,
-        story.hn_url()
-    ));
+    parts.push(format!("[{} comment{s}](<{hn_page}> \"muted\")", story.descendants));
     parts.join(" · ")
 }
 
@@ -180,7 +191,10 @@ fn with_pictures(md: &str, preview: bool, pictures: Pictures) -> String {
         edits.push((i, at..at, format!("\n\n{}\n\n", figure::marker(picture, rows, i))));
         edits.push((i, f.at.clone(), String::new()));
     }
-    edits.sort_by_key(|(i, range, _)| (std::cmp::Reverse(range.start), std::cmp::Reverse(*i)));
+    // Where a picture's taken out at the very place one goes in (an article
+    // that starts with its first), out before in, or the taking out would
+    // cut into what went in.
+    edits.sort_by_key(|(i, range, _)| (std::cmp::Reverse(range.start), std::cmp::Reverse(*i), range.is_empty()));
     let mut md = md.to_string();
     for (_, range, text) in edits {
         md.replace_range(range, &text);
@@ -254,6 +268,8 @@ struct Context<'a> {
     now: u64,
     /// The newest comment seen before: newer ones are marked new.
     seen: Option<u64>,
+    /// Comments shown as just their header, their text and replies hidden.
+    folded: &'a HashSet<u64>,
 }
 
 /// A comment and its replies. Top-level comments are headings, so `]`,
@@ -267,18 +283,27 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
         author(&c.by)
     };
     // The age links to the comment, as on HN: it's what `v` and `r` choose.
-    let when = format!("[{}](<{}>)", ago(c.time, context.now), hn::item_url(c.id));
+    let when = format!("[{}](<{}> \"muted\")", ago(c.time, context.now), hn::item_url(c.id));
     let new = if context.seen.is_some_and(|seen| c.id > seen) {
         " · `new`"
     } else {
         ""
     };
-    let mut body = if depth == 0 {
-        format!("### {who} · {when}{new}\n\n")
-    } else {
-        format!("**{who}** · {when}{new}\n\n")
+    let folded = context.folded.contains(&c.id);
+    let hidden = match c.count() - 1 {
+        _ if !folded => String::new(),
+        0 => " · ▸ folded".to_string(),
+        1 => " · ▸ 1 more".to_string(),
+        n => format!(" · ▸ {n} more"),
     };
-    body.push_str(&html_to_md(&c.text));
+    let mut body = if depth == 0 {
+        format!("### {who} · {when}{new}{hidden}\n\n")
+    } else {
+        format!("**{who}** · {when}{new}{hidden}\n\n")
+    };
+    if !folded {
+        body.push_str(&html_to_md(&c.text));
+    }
     // Every comment in a bar, top-level ones too, so its header and text
     // read as one block.
     let bars = "> ".repeat(depth.min(MAX_DEPTH) + 1);
@@ -296,6 +321,9 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
         md.push('\n');
     }
     md.push('\n');
+    if folded {
+        return;
+    }
     for reply in &c.replies {
         comment(md, reply, depth + 1, context);
     }
@@ -649,6 +677,30 @@ mod tests {
     }
 
     #[test]
+    fn folded_comments_are_just_their_header() {
+        let reply = Comment {
+            id: 2,
+            by: "alice".into(),
+            text: "the reply".into(),
+            time: 0,
+            replies: vec![],
+        };
+        let comments = vec![Comment {
+            id: 1,
+            by: "bob".into(),
+            text: "the comment".into(),
+            time: 0,
+            replies: vec![reply],
+        }];
+        let folded = HashSet::from([1]);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &folded }, &|_| None);
+        assert!(md.contains("· ▸ 1 more"), "{md}");
+        assert!(!md.contains("the comment") && !md.contains("the reply"), "{md}");
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        assert!(md.contains("the comment") && md.contains("the reply") && !md.contains("▸"));
+    }
+
+    #[test]
     fn replies_nest_in_quotes_under_top_level_headings() {
         let comments = vec![Comment {
             id: 1,
@@ -663,13 +715,13 @@ mod tests {
                 replies: vec![],
             }],
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, None, &|_| None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
         assert!(md.starts_with("# Show HN: A \\*thing\\*\n"), "{md}");
-        assert!(md.contains("[example\\.com](<https://www.example.com/post>) · 42 points"));
+        assert!(md.contains("[example\\.com](<https://www.example.com/post>) · [42 points](<https://news.ycombinator.com/item?id=7> \"muted\")"), "{md}");
         assert!(md.contains("*Loading the article…*"));
         assert!(md.contains("## Comments (2)\n"));
-        assert!(md.contains("> ### [bob](<https://news.ycombinator.com/user?id=bob>) · [2h ago](<https://news.ycombinator.com/item?id=1>)\n>\n> Top\n>\n> second\n"), "{md}");
-        assert!(md.contains("> > **[alice](<https://news.ycombinator.com/user?id=alice>) (OP)** · [1h ago](<https://news.ycombinator.com/item?id=2>)\n> >\n> > reply\n"), "{md}");
+        assert!(md.contains("> ### [bob](<https://news.ycombinator.com/user?id=bob>) · [2h ago](<https://news.ycombinator.com/item?id=1> \"muted\")\n>\n> Top\n>\n> second\n"), "{md}");
+        assert!(md.contains("> > **[alice](<https://news.ycombinator.com/user?id=alice>) (OP)** · [1h ago](<https://news.ycombinator.com/item?id=2> \"muted\")\n> >\n> > reply\n"), "{md}");
         // Still headings, in their bars, for `]` and `[`.
         let doc = crate::render::render(&md, 80, &crate::theme::Theme::plain(), None, None);
         assert!(doc.headings.iter().any(|h| h.level == 3 && h.text.starts_with("bob")));
@@ -690,12 +742,12 @@ mod tests {
             replies: vec![reply],
             ..Comment::default()
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Some(20), &|_| None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: Some(20), folded: &HashSet::new() }, &|_| None);
         assert!(md.contains("## Comments (2, 1 new)"), "{md}");
-        assert!(md.contains("id=bob>) · [now](<https://news.ycombinator.com/item?id=10>)\n"), "{md}");
-        assert!(md.contains("id=carol>)** · [now](<https://news.ycombinator.com/item?id=30>) · `new`"), "{md}");
+        assert!(md.contains("id=bob>) · [now](<https://news.ycombinator.com/item?id=10> \"muted\")\n"), "{md}");
+        assert!(md.contains("id=carol>)** · [now](<https://news.ycombinator.com/item?id=30> \"muted\") · `new`"), "{md}");
         // Never read: nothing's new.
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, None, &|_| None);
+        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
@@ -734,7 +786,7 @@ mod tests {
     #[test]
     fn unreadable_articles_say_why_and_where_they_are() {
         let article = Article::Unreadable("the page is gone".into());
-        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, None, &|_| None);
+        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
         assert!(md.contains("> [!NOTE] Couldn't read the article\n> The page is gone."), "{md}");
         assert!(
             md.contains("> [https://www\\.example\\.com/post](<https://www.example.com/post>)\\\n> `w` opens it"),
@@ -757,6 +809,9 @@ mod tests {
         assert!(shown.contains("![two]") && !shown.contains("![one]"), "{shown}");
         // Previews have only the first.
         assert!(!with_pictures(md, true, &both).contains("image: 400 200 12 1"));
+        // An article that starts with its picture.
+        let md = "![one](https://x.com/1.jpg)\n\nIntro.";
+        assert_eq!(with_pictures(md, false, &both), "<!-- image: 400 200 24 0 -->\n\n\n\nIntro.");
     }
 
     #[test]
@@ -769,8 +824,8 @@ mod tests {
             md: format!("# Show HN: A *thing*\n\n{md}"),
             words: 280,
         };
-        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, None, &|_| None);
-        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, None, &|_| None);
+        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
         assert!(full.contains("Paragraph 39"));
         assert!(!preview.contains("Paragraph 39"));
         assert!(preview.contains("min read"));

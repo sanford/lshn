@@ -34,7 +34,9 @@ impl App {
             rows.push(Row::item(choice.name().into(), line, Target::Theme(choice)));
         }
         rows.push(Row::heading("Themes"));
-        for name in palettes::names() {
+        // The default first, then the rest.
+        let rest = palettes::names().filter(|&n| n != palettes::DEFAULT);
+        for name in std::iter::once(palettes::DEFAULT).chain(rest) {
             rows.push(Row::item(
                 name.into(),
                 self.swatch(name),
@@ -69,6 +71,9 @@ impl App {
         }
         if !p.is_dark() {
             spans.push(Span::raw("  light").dim());
+        }
+        if name == palettes::DEFAULT {
+            spans.push(Span::raw("  default").dim());
         }
         Line::from(spans)
     }

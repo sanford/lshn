@@ -55,11 +55,13 @@ pub struct Doc {
     figures: Vec<Figure>,
     /// Each comment's own lines, not its replies'.
     comments: Vec<CommentSpan>,
-    /// The comment moved to, while the view stays where that put it: the
-    /// last ones can't reach the reading line.
-    focus: Option<(usize, usize)>,
-    /// Whether the focused comment's bar is drawn heavy, and how.
-    focus_style: Option<Style>,
+    /// The comment the cursor's on, by id, so it stays put when the thread
+    /// changes; `None` in the article above.
+    cursor: Option<u64>,
+    /// Across a re-render, the row on screen the cursor's comment was on.
+    cursor_row: Option<usize>,
+    /// How the cursor's comment is shown, when it is.
+    focus_style: Option<FocusStyle>,
     search: Option<Search>,
     /// Link hints on screen, while choosing a link to follow.
     pub hints: Vec<Hint>,
@@ -98,7 +100,8 @@ impl Doc {
             links: Vec::new(),
             figures: Vec::new(),
             comments: Vec::new(),
-            focus: None,
+            cursor: None,
+            cursor_row: None,
             focus_style: None,
             search: None,
             hints: Vec::new(),
@@ -122,6 +125,12 @@ impl Doc {
             return;
         }
         self.keep = self.place();
+        // The comment the cursor's on, where it was on screen: a fold, or
+        // new comments above, mustn't move it.
+        self.cursor_row = self
+            .cursor_index()
+            .and_then(|i| self.comments[i].start.checked_sub(self.top))
+            .filter(|&row| row < self.height);
         self.md = md;
         self.width = 0;
     }
@@ -198,6 +207,9 @@ impl Doc {
         if let Some(slug) = self.pending_anchor.take() {
             self.go_to_anchor(&slug);
         }
+        if let (Some(row), Some(i)) = (self.cursor_row.take(), self.cursor_index()) {
+            self.top = self.comments[i].start.saturating_sub(row).min(self.max_top());
+        }
         if let Some((line, query)) = self.pending_match.take() {
             self.go_to_match(line, &query);
         }
@@ -241,6 +253,7 @@ impl Doc {
         self.layout(width.max(1), theme);
         self.height = area.height.into();
         self.top = self.top.min(self.max_top());
+        self.follow_view();
         self.draw_rendered(f, area);
     }
 
@@ -374,9 +387,12 @@ impl Doc {
         if let (Some(style), Some(c)) = (self.focus_style, self.focused())
             && (c.start..c.end).contains(&i)
         {
-            line.spans = focus_bars(line.spans, c.depth * 2, style);
+            line.spans = focus_bars(line.spans, c.depth * 2, style.accent);
             if i == c.start {
-                line.spans.push(Span::styled("   r reply · v upvote", Style::new().dim()));
+                line.spans.push(Span::styled("   r reply · v upvote · space fold", Style::new().dim()));
+            }
+            if let Some(band) = style.band {
+                line.spans = banded(line.spans, c.depth * 2, self.width, band);
             }
         }
         let Some(search) = &self.search else {
@@ -420,41 +436,101 @@ impl Doc {
         &self.headings
     }
 
-    /// Scrolls the rendered side so line `i` is at the top.
-    /// Halfway down the screen: the comment there is the one being read.
-    fn reading_line(&self) -> usize {
-        self.top + self.height / 2
+    fn cursor_index(&self) -> Option<usize> {
+        let id = self.cursor?;
+        self.comments.iter().position(|c| c.id == id)
     }
 
-    fn focused_index(&self) -> Option<usize> {
-        if let Some((i, top)) = self.focus
-            && top == self.top
-            && i < self.comments.len()
-        {
-            return Some(i);
-        }
-        let reading = self.reading_line();
-        // The last to start at or above it; in the gap after one, still it.
-        let i = self.comments.partition_point(|c| c.start <= reading);
-        i.checked_sub(1)
-    }
-
-    /// The comment being read: at the reading line, or moved to.
+    /// The comment the cursor's on.
     pub fn focused(&self) -> Option<CommentSpan> {
-        self.focused_index().map(|i| self.comments[i])
+        self.cursor_index().map(|i| self.comments[i])
     }
 
-    /// Draws the focused comment's bar heavy, in `style`; or not, `None`.
-    pub fn show_focus(&mut self, style: Option<Style>) {
+    /// How to show the cursor's comment, or not to.
+    pub fn show_focus(&mut self, style: Option<FocusStyle>) {
         self.focus_style = style;
     }
 
-    /// Moves to the next or previous heading or comment (only top-level
-    /// ones, unless `replies`), putting a comment at the reading line.
-    /// Returns false if there's none that way.
+    /// `j` or `k`: in the article, a line; among the comments, the next or
+    /// previous one, scrolling only as far as it takes to show it whole.
+    /// One taller than the screen is scrolled through first. Scrolling
+    /// goes `lines` at a time.
+    pub fn step(&mut self, forward: bool, lines: usize) {
+        let by = lines.max(1) as isize;
+        let bottom = self.top + self.height;
+        let Some(i) = self.cursor_index() else {
+            // The first comment on screen takes the cursor.
+            let first = self.comments.iter().position(|c| c.start >= self.top && c.start < bottom);
+            match first {
+                Some(i) if forward => self.move_cursor(i, true),
+                _ => self.scroll_by(if forward { by } else { -by }),
+            }
+            return;
+        };
+        let c = self.comments[i];
+        if forward {
+            if c.end > bottom || i + 1 == self.comments.len() {
+                self.scroll_by(by);
+            } else {
+                self.move_cursor(i + 1, true);
+            }
+        } else if c.start < self.top {
+            self.scroll_by(-by);
+        } else if i == 0 {
+            // Back up into the article.
+            self.cursor = None;
+            self.scroll_by(-by);
+        } else {
+            self.move_cursor(i - 1, false);
+        }
+    }
+
+    /// Puts the cursor on comment `i`, scrolling as little as shows it: all
+    /// of it if it fits, or else its top coming down, its end going up.
+    fn move_cursor(&mut self, i: usize, down: bool) {
+        const ABOVE: usize = 1;
+        const BELOW: usize = 2;
+        self.cursor = Some(self.comments[i].id);
+        let (start, end) = (self.comments[i].start, self.comments[i].end);
+        let room = self.height.saturating_sub(ABOVE + BELOW).max(1);
+        let top = if end - start > room {
+            if down {
+                start.saturating_sub(ABOVE)
+            } else {
+                (end + BELOW).saturating_sub(self.height).min(self.top)
+            }
+        } else if start < self.top + ABOVE {
+            start.saturating_sub(ABOVE)
+        } else if end + BELOW > self.top + self.height {
+            (end + BELOW).saturating_sub(self.height)
+        } else {
+            self.top
+        };
+        self.top = top.min(self.max_top());
+    }
+
+    /// After scrolling some other way (a page, the mouse, a search): the
+    /// cursor onto the comments on screen, if it's left them.
+    fn follow_view(&mut self) {
+        let (top, bottom) = (self.top, self.top + self.height);
+        let on_screen = |c: &CommentSpan| c.start < bottom && c.end > top;
+        match self.cursor_index() {
+            Some(i) if on_screen(&self.comments[i]) => {}
+            None if self.comments.first().is_none_or(|c| c.start > top) => {}
+            _ => {
+                let seen = self.comments.iter().find(|c| c.start >= top && c.start < bottom);
+                let here = seen.or_else(|| self.comments.iter().find(|c| on_screen(c)));
+                self.cursor = here.map(|c| c.id);
+            }
+        }
+    }
+
+    /// Moves to the next or previous comment (only top-level ones, unless
+    /// `replies`), or in the article, heading. Returns false if there's
+    /// nothing that way.
     pub fn jump(&mut self, forward: bool, replies: bool) -> bool {
-        let focused = self.focused_index();
-        let from = focused.map_or(self.top, |i| self.comments[i].start);
+        let at = self.cursor_index();
+        let from = at.map_or(self.top, |i| self.comments[i].start);
         let comments = self
             .comments
             .iter()
@@ -474,19 +550,12 @@ impl Doc {
             targets.filter(|t| t.0 < from).max()
         };
         match target {
-            Some((line, Some(i))) => {
-                // Centred, if it fits; if not, from its header down.
-                let rows = self.comments[i].end - line;
-                let top = if rows < self.height {
-                    (line + rows / 2).saturating_sub(self.height / 2)
-                } else {
-                    line.saturating_sub(1)
-                };
-                self.top = top.min(self.max_top());
-                self.focus = Some((i, self.top));
+            Some((_, Some(i))) => {
+                self.move_cursor(i, forward);
                 true
             }
             Some((line, None)) => {
+                self.cursor = None;
                 self.jump_to(line);
                 true
             }
@@ -494,6 +563,7 @@ impl Doc {
         }
     }
 
+    /// Scrolls the rendered side so line `i` is at the top.
     pub fn jump_to(&mut self, i: usize) {
         self.top = i.min(self.max_top());
     }
@@ -675,17 +745,7 @@ impl Doc {
     }
 
     pub fn scroll_by(&mut self, delta: isize) {
-        let before = self.top;
         self.top = self.top.saturating_add_signed(delta).min(self.max_top());
-        // At the end, the last comments can't come up to the reading line:
-        // scrolling on moves to them instead.
-        if self.top == before
-            && delta > 0
-            && let Some(i) = self.focused_index()
-            && i + 1 < self.comments.len()
-        {
-            self.focus = Some((i + 1, self.top));
-        }
     }
 
     pub fn scroll_to_top(&mut self) {
@@ -738,6 +798,48 @@ fn blocks(lines: &[RLine]) -> Vec<Block> {
 /// Rounds down, but treats 2.9999999 as the 3 it's meant to be.
 fn floor(x: f64) -> usize {
     (x + 1e-9) as usize
+}
+
+/// How the cursor's comment stands out: its bars in `accent`, and behind
+/// it, if there's one, a `band` of color.
+#[derive(Clone, Copy, Debug)]
+pub struct FocusStyle {
+    pub accent: Style,
+    pub band: Option<ratatui::style::Color>,
+}
+
+/// `spans` with `color` behind them from column `from`, out to `width`.
+fn banded(spans: Vec<Span<'static>>, from: usize, width: usize, color: ratatui::style::Color) -> Vec<Span<'static>> {
+    let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
+    let mut col = 0;
+    for span in spans {
+        let w = wrap::width(&span.content);
+        if col + w <= from {
+            out.push(span);
+        } else if col >= from {
+            out.push(Span::styled(span.content, span.style.bg(color)));
+        } else {
+            // Split where the band starts.
+            let mut left = String::new();
+            let mut right = String::new();
+            let mut at = col;
+            for ch in span.content.chars() {
+                if at < from { left.push(ch) } else { right.push(ch) }
+                at += wrap::width(ch.encode_utf8(&mut [0; 4]));
+            }
+            out.push(Span::styled(left, span.style));
+            out.push(Span::styled(right, span.style.bg(color)));
+        }
+        col += w;
+    }
+    if col < width {
+        let pad = " ".repeat(width - col.max(from));
+        if col < from {
+            out.push(Span::raw(" ".repeat(from - col)));
+        }
+        out.push(Span::styled(pad, Style::new().bg(color)));
+    }
+    out
 }
 
 /// A comment's own lines: from its first to its last with text, before
@@ -872,9 +974,81 @@ mod tests {
         assert_eq!(doc.focused().map(|c| c.id), Some(3));
         assert!(doc.jump(false, false));
         assert_eq!(doc.focused().map(|c| c.id), Some(1));
-        // Scrolling, the focus follows the reading line again.
-        doc.scroll_by(1);
-        assert!(doc.focused().is_some());
+        // Scrolling past it, the cursor comes along.
+        doc.jump_to(doc.comments[2].start);
+        doc.follow_view();
+        assert_eq!(doc.focused().map(|c| c.id), Some(3));
+    }
+
+    /// Article lines, then three comments, the second taller than the
+    /// screen.
+    fn long_thread() -> Doc {
+        use crate::render::comment_marker;
+        let theme = Theme::plain();
+        let article = (1..=6).map(|n| format!("article {n}\n\n")).collect::<String>();
+        let long = (1..=8).map(|n| format!("> long {n}\n>\n")).collect::<String>();
+        let md = format!(
+            "{article}{}\n\n> ### a\n>\n> short\n\n{}\n\n> ### b\n>\n{long}\n{}\n\n> ### c\n>\n> last\n",
+            comment_marker(1, 0),
+            comment_marker(2, 0),
+            comment_marker(3, 0),
+        );
+        let mut doc = Doc::new(md);
+        doc.layout(40, &theme);
+        doc.height = 6;
+        doc
+    }
+
+    #[test]
+    fn j_and_k_move_by_comment_once_theyre_on_screen() {
+        let mut doc = long_thread();
+        let id = |doc: &Doc| doc.focused().map(|c| c.id);
+        // The article scrolls, as many lines at a time as asked, till a
+        // comment shows.
+        doc.step(true, 2);
+        assert_eq!((doc.top, id(&doc)), (2, None));
+        doc.step(false, 1);
+        assert_eq!((doc.top, id(&doc)), (1, None));
+        while id(&doc).is_none() {
+            doc.step(true, 1);
+        }
+        assert_eq!(id(&doc), Some(1));
+        let a = doc.comments[0];
+        assert!(a.start >= doc.top && a.end <= doc.top + doc.height, "all of it shows");
+        // To the long one: its top shows, and j reads down through it
+        // before moving on.
+        doc.step(true, 1);
+        assert_eq!(id(&doc), Some(2));
+        let b = doc.comments[1];
+        assert_eq!(doc.top, b.start - 1);
+        let mut steps = 0;
+        while id(&doc) == Some(2) {
+            doc.step(true, 1);
+            steps += 1;
+        }
+        assert!(steps > 5, "scrolled through it first, in {steps}");
+        assert_eq!(id(&doc), Some(3));
+        // And k back: up through the long one from its end.
+        doc.step(false, 1);
+        assert_eq!(id(&doc), Some(2));
+        assert!(b.end <= doc.top + doc.height, "its end shows");
+        while id(&doc) == Some(2) {
+            doc.step(false, 1);
+        }
+        assert_eq!(id(&doc), Some(1));
+        // Above the first, back to the article.
+        doc.step(false, 1);
+        assert_eq!(id(&doc), None);
+    }
+
+    #[test]
+    fn paging_brings_the_cursor_along() {
+        let mut doc = long_thread();
+        doc.jump(true, true);
+        assert_eq!(doc.focused().map(|c| c.id), Some(1));
+        doc.jump_to(doc.comments[2].start);
+        doc.follow_view();
+        assert_eq!(doc.focused().map(|c| c.id), Some(3));
     }
 
     #[test]
