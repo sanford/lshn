@@ -19,6 +19,26 @@ pub struct RLine {
     pub src: Option<(usize, usize)>,
     /// The links on this line, by column. Their ids index [`Rendered::links`].
     pub links: Vec<LinkSpan>,
+    /// The columns of its own text, for copying: after the quote bars,
+    /// list markers or padding in front of it, and before any padding
+    /// after.
+    pub body: (usize, usize),
+    /// How it goes on from the line before, when copied.
+    pub join: Join,
+    /// The columns of quote bars and list markers in front of it.
+    pub front: usize,
+}
+
+/// How a line goes on from the one before it, when copied.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Join {
+    /// A line of its own.
+    #[default]
+    Break,
+    /// The rest of a paragraph, wrapped: a space between.
+    Space,
+    /// The rest of a line of code, wrapped: nothing between.
+    Direct,
 }
 
 /// A rendered document.
@@ -237,10 +257,14 @@ impl Renderer<'_> {
                 .flat_map(|p| p.rest.iter().cloned())
                 .collect();
             trim_end(&mut blank);
+            let width = wrap::spans_width(&blank);
             self.out.push(RLine {
                 spans: blank,
                 src: None,
                 links: Vec::new(),
+                body: (width, width),
+                join: Join::Break,
+                front: width,
             });
         }
     }
@@ -260,6 +284,7 @@ impl Renderer<'_> {
             });
             p.used = true;
         }
+        let body = wrap::spans_width(&line);
         // Every rendered line comes through here: the one place to make
         // sure nothing in a document can act on the terminal.
         line.extend(spans.into_iter().map(|mut span| {
@@ -272,6 +297,9 @@ impl Renderer<'_> {
             spans: line,
             src: self.src,
             links: Vec::new(),
+            body: (body, usize::MAX),
+            join: Join::Break,
+            front: body,
         });
     }
 
@@ -297,8 +325,27 @@ impl Renderer<'_> {
     }
 
     fn para(&mut self, pieces: &[Piece]) {
-        for line in wrap::wrap_links(pieces, self.avail()) {
+        for (i, line) in wrap::wrap_links(pieces, self.avail()).into_iter().enumerate() {
             self.emit_wrapped(line);
+            if i > 0 {
+                self.joins(Join::Space);
+            }
+        }
+    }
+
+    /// Marks the last line as going on from the one before.
+    fn joins(&mut self, join: Join) {
+        if let Some(line) = self.out.last_mut() {
+            line.join = join;
+        }
+    }
+
+    /// Marks where the last line's own text is: `skip` columns in from
+    /// what's in front of it, and `width` wide.
+    fn body(&mut self, skip: usize, width: usize) {
+        if let Some(line) = self.out.last_mut() {
+            let start = line.body.0 + skip;
+            line.body = (start, start + width);
         }
     }
 
@@ -405,11 +452,14 @@ impl Renderer<'_> {
             slug: self.anchors.anchorize(&text),
             text,
         });
-        for line in lines {
+        for (i, line) in lines.into_iter().enumerate() {
             if big {
                 self.big.push(self.out.len());
             }
             self.emit_wrapped(line);
+            if i > 0 {
+                self.joins(Join::Space);
+            }
             if big {
                 self.emit(Vec::new());
             }
@@ -503,9 +553,14 @@ impl Renderer<'_> {
                     } else {
                         format!("  {MORE} ")
                     })];
+                    let width = wrap::spans_width(&chunk);
                     spans.extend(chunk);
                     trim_end(&mut spans);
                     self.emit(spans);
+                    self.body(4, width);
+                    if i > 0 {
+                        self.joins(Join::Direct);
+                    }
                 }
             }
             return;
@@ -517,7 +572,8 @@ impl Renderer<'_> {
         let mut first = true;
         for line in lines {
             for (i, chunk) in wrap::hard_wrap(line, inner).into_iter().enumerate() {
-                let mut pad = inner.saturating_sub(wrap::spans_width(&chunk)) + 1;
+                let chunk_w = wrap::spans_width(&chunk);
+                let mut pad = inner.saturating_sub(chunk_w) + 1;
                 let mut spans = vec![if i == 0 {
                     Span::styled(" ", base)
                 } else {
@@ -532,6 +588,10 @@ impl Renderer<'_> {
                 }
                 spans.push(Span::styled(" ".repeat(pad), base));
                 self.emit(spans);
+                self.body(1, chunk_w);
+                if i > 0 {
+                    self.joins(Join::Direct);
+                }
                 first = false;
             }
         }

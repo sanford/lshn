@@ -6,12 +6,12 @@
 //! line, so a 1-line table that renders as 10 lines, or a paragraph that
 //! wraps to 5, stays in place.
 
-use crate::render::{CommentMark, Figure, Heading, RLine, render};
+use crate::render::{CommentMark, Figure, Heading, Join, RLine, render};
 use crate::theme::Theme;
 use crate::wrap;
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use std::path::PathBuf;
@@ -90,7 +90,13 @@ pub struct Doc {
     rendered_area: Rect,
     /// Where the scrollbar was drawn (empty when there was none).
     scrollbar: Rect,
+    /// Text selected with the mouse, to copy: where the drag started and
+    /// where it is.
+    pub selection: Option<(Spot, Spot)>,
 }
+
+/// A place in the text: a rendered line, and a column on it.
+pub type Spot = (usize, usize);
 
 impl Doc {
     pub fn new(md: String) -> Doc {
@@ -118,6 +124,7 @@ impl Doc {
             height: 0,
             rendered_area: Rect::default(),
             scrollbar: Rect::default(),
+            selection: None,
         }
     }
 
@@ -188,6 +195,7 @@ impl Doc {
         self.links = rendered.links;
         self.figures = rendered.figures;
         self.big = rendered.big;
+        self.selection = None;
         self.comments = comment_spans(&rendered.comments, &self.lines);
         self.width = width;
         if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
@@ -275,6 +283,33 @@ impl Doc {
             .collect();
         f.render_widget(Paragraph::new(visible), area);
         self.draw_scrollbar(f, area);
+        if let Some((from, to)) = self.selected() {
+            let bottom = self.top + self.height;
+            for line in from.0.max(self.top)..=to.0.min(bottom.saturating_sub(1)) {
+                // From the text, not the bars beside it.
+                let start = if line == from.0 {
+                    from.1
+                } else {
+                    self.lines[line].front
+                };
+                let end = if line == to.0 {
+                    to.1 + 1
+                } else {
+                    wrap::spans_width(&self.lines[line].spans)
+                };
+                let end = end.min(width);
+                if start < end {
+                    let row = Rect::new(
+                        area.x + start as u16,
+                        area.y + (line - self.top) as u16,
+                        (end - start) as u16,
+                        1,
+                    );
+                    f.buffer_mut()
+                        .set_style(row, Style::new().add_modifier(Modifier::REVERSED));
+                }
+            }
+        }
         // Before the link hints, which a big title would hide.
         for &line in &self.big {
             let Some(row) = line.checked_sub(self.top) else {
@@ -427,6 +462,136 @@ impl Doc {
             line.spans = wrap::restyle(line.spans, start, end, style);
         }
         line
+    }
+
+    /// The spot at screen position (x, y), or the nearest on the text:
+    /// above it, the top line; below it, the bottom one.
+    pub fn spot_at(&self, x: u16, y: u16) -> Spot {
+        let area = self.rendered_area;
+        let row = y.clamp(area.y, area.bottom().saturating_sub(1)) - area.y;
+        let last = self.lines.len().saturating_sub(1);
+        let line = (self.top + usize::from(row)).min(last);
+        (line, usize::from(x.saturating_sub(area.x)))
+    }
+
+    /// Selects from where a drag started to (x, y), scrolling a line
+    /// when it's gone past the top or bottom.
+    pub fn select_to(&mut self, from: Spot, x: u16, y: u16) {
+        let area = self.rendered_area;
+        if y < area.y {
+            self.scroll_by(-1);
+        } else if y >= area.bottom() {
+            self.scroll_by(1);
+        }
+        self.selection = Some((from, self.spot_at(x, y)));
+    }
+
+    /// The selection, its first spot first.
+    fn selected(&self) -> Option<(Spot, Spot)> {
+        let (a, b) = self.selection?;
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// The selected text, to copy.
+    pub fn selected_text(&self) -> Option<String> {
+        let (from, to) = self.selected()?;
+        let text = self.text_between(from, (to.0, to.1 + 1));
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// The text from spot `from` to just before `to`, as plain text: no
+    /// quote bars, paragraphs whole again, and links that show an address
+    /// (cut short, often) as their whole address.
+    pub fn text_between(&self, from: Spot, to: Spot) -> String {
+        let mut out: Vec<String> = Vec::new();
+        let mut link = None;
+        let last = to.0.min(self.lines.len().saturating_sub(1));
+        for i in from.0..=last {
+            let line = &self.lines[i];
+            let start = if i == from.0 { from.1 } else { 0 };
+            let end = if i == to.0 { to.1 } else { usize::MAX };
+            let (body, body_end) = line.body;
+            let text = self.columns(i, start.max(body), end.min(body_end), &mut link);
+            let text = text.trim_end();
+            match (line.join, out.last_mut()) {
+                (Join::Space, Some(prev)) if i > from.0 => {
+                    if !prev.is_empty() && !text.is_empty() {
+                        prev.push(' ');
+                    }
+                    prev.push_str(text.trim_start());
+                }
+                (Join::Direct, Some(prev)) if i > from.0 => prev.push_str(text),
+                _ => {
+                    // What's in front, less the quote bars: a list's marker.
+                    // Started partway in, as indented as the line's text,
+                    // to be only as indented as the rest in the end.
+                    let lead = if start > line.front {
+                        " ".repeat(line.front)
+                    } else {
+                        self.columns(i, start, line.front.min(end), &mut None)
+                    };
+                    out.push(lead.replace('│', " ") + text);
+                }
+            }
+        }
+        tidy(out)
+    }
+
+    /// Line `i`'s text from column `start` to just before `end`, with a
+    /// link that shows an address given as the address it goes to: once,
+    /// though it's wrapped over lines, which `link`, the last one given,
+    /// keeps track of.
+    fn columns(&self, i: usize, start: usize, end: usize, link: &mut Option<u32>) -> String {
+        use unicode_width::UnicodeWidthChar;
+        let line = &self.lines[i];
+        let shown = |l: &crate::wrap::LinkSpan| {
+            let text = self.column_text(i, l.start, l.end);
+            let target = self.links.get(l.id as usize)?;
+            let address = text.contains("://") || text.starts_with("www.");
+            (address && target.starts_with("http")).then_some(target)
+        };
+        let mut out = String::new();
+        let mut col = 0;
+        for c in line.spans.iter().flat_map(|s| s.content.chars()) {
+            let here = col;
+            col += c.width().unwrap_or(0);
+            if here < start || here >= end {
+                continue;
+            }
+            match line.links.iter().find(|l| (l.start..l.end).contains(&here)) {
+                Some(l) if shown(l).is_some() || *link == Some(l.id) => {
+                    if *link != Some(l.id)
+                        && let Some(target) = shown(l)
+                    {
+                        out.push_str(target);
+                    }
+                    *link = Some(l.id);
+                }
+                _ => out.push(c),
+            }
+        }
+        out
+    }
+
+    /// Line `i`'s text from column `start` to just before `end`, as shown.
+    fn column_text(&self, i: usize, start: usize, end: usize) -> String {
+        use unicode_width::UnicodeWidthChar;
+        let mut col = 0;
+        let mut out = String::new();
+        for c in self.lines[i].spans.iter().flat_map(|s| s.content.chars()) {
+            if (start..end).contains(&col) {
+                out.push(c);
+            }
+            col += c.width().unwrap_or(0);
+        }
+        out
+    }
+
+    /// The text of the comment the cursor's on, without its header.
+    pub fn focused_text(&self) -> Option<String> {
+        let c = self.focused()?;
+        let text = self.text_between((c.start + 1, 0), (c.end.checked_sub(1)?, usize::MAX));
+        (!text.trim().is_empty()).then_some(text)
     }
 
     /// Whether screen position (x, y) is on the text.
@@ -887,6 +1052,33 @@ fn comment_spans(marks: &[CommentMark], lines: &[RLine]) -> Vec<CommentSpan> {
         .collect()
 }
 
+/// Copied lines as text: indented only as much as they are more than the
+/// least, with no blank lines at either end or more than one together.
+fn tidy(lines: Vec<String>) -> String {
+    let lines: Vec<String> = lines.into_iter().map(|l| l.trim_end().to_string()).collect();
+    let indent = lines
+        .iter()
+        .filter(|l| !l.is_empty())
+        .map(|l| l.len() - l.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
+    let mut out = String::new();
+    let mut blank = false;
+    for line in &lines {
+        if line.is_empty() {
+            blank = !out.is_empty();
+            continue;
+        }
+        if blank {
+            out.push('\n');
+            blank = false;
+        }
+        out.push_str(&line[indent..]);
+        out.push('\n');
+    }
+    out
+}
+
 /// `spans` with the quote bars up to column `last` in `style`, and the one
 /// there, the comment's own, drawn heavy.
 fn focus_bars(spans: Vec<Span<'static>>, last: usize, style: Style) -> Vec<Span<'static>> {
@@ -924,6 +1116,38 @@ mod tests {
         doc.layout(width, &theme);
         doc.height = 1;
         doc
+    }
+
+    #[test]
+    fn copies_plain_text_without_bars_and_with_whole_paragraphs() {
+        let md = "# Title\n\n> ### ann · 1h ago\n>\n> A first paragraph long enough to wrap onto more lines.\n>\n> > ### bob · 2h ago\n> >\n> > - a list item\n> > - see [https://example.com/a/lon...](https://example.com/a/long/path) and [this](https://x.org)\n\n```\nlet code = \"a line of code that is too long to fit\";\n```\n";
+        let mut doc = Doc::new(md.into());
+        doc.layout(30, &Theme::new(crate::theme::Mode::Dark, true, None));
+        let last = doc.lines.len() - 1;
+        let all = doc.text_between((0, 0), (last, usize::MAX));
+        assert_eq!(
+            all,
+            "Title\n═════\n\n  \
+             ann · 1h ago\n\n  \
+             A first paragraph long enough to wrap onto more lines.\n\n    \
+             bob · 2h ago\n\n    \
+             • a list item\n    \
+             • see https://example.com/a/long/path and this\n\n\
+             let code = \"a line of code that is too long to fit\";\n"
+        );
+        // Just the reply: indented no more than it has to be.
+        let bob = doc.lines.iter().position(|l| l.text().contains("bob")).unwrap();
+        assert!(doc.text_between((bob, 0), (bob + 3, usize::MAX)).starts_with("bob · 2h ago\n\n• a list item\n"));
+        // From the middle of a line to the middle of the next.
+        let first = doc.lines.iter().position(|l| l.text().contains("A first")).unwrap();
+        doc.selection = Some(((first + 1, 7), (first, 4)));
+        let text = doc.selected_text().unwrap();
+        assert!(text.starts_with("first paragraph") && text.lines().count() == 1, "{text:?}");
+        // From partway into a comment to the reply below: the reply's no
+        // more indented than it was.
+        let bob = doc.lines.iter().position(|l| l.text().contains("bob")).unwrap();
+        let text = doc.text_between((first, 4), (bob, usize::MAX));
+        assert!(text.ends_with("lines.\n\n  bob · 2h ago\n"), "{text:?}");
     }
 
     /// The article arriving above the comments mustn't move the comment

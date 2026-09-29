@@ -2,6 +2,8 @@
 //! right (title, article, then comments), and the story full screen.
 
 mod act;
+mod copy;
+mod menu;
 mod mouse;
 mod nav;
 mod outline;
@@ -16,7 +18,7 @@ use crate::omarchy::Follow;
 use crate::store::{self, Cache, Seen, SeenStore};
 use crate::story::{self, Comments};
 use crate::theme::{Choice, Mode, Theme};
-use crate::{clipboard, safe, wrap};
+use crate::{safe, wrap};
 use image::DynamicImage;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
@@ -319,7 +321,7 @@ struct App {
     left_on: Option<u64>,
     /// The width stories and the list share, at the last draw.
     body_width: u16,
-    /// Where `c` came to the comments from, to go back to.
+    /// Where `C` came to the comments from, to go back to.
     before_comments: HashMap<DocKey, usize>,
     /// Show the outline pane beside the story while reading.
     outline_pane: bool,
@@ -344,6 +346,9 @@ struct App {
     flash: Option<String>,
     /// The mouse is in use.
     mouse_on: bool,
+    /// Where the left button went down on the text, and whether it's
+    /// dragged since: a drag selects, a click follows a link.
+    press: Option<(crate::doc::Spot, bool)>,
     /// Ctrl-Z was pressed: stop, once the key's handled.
     suspend: bool,
     /// Where big titles were drawn last frame.
@@ -421,6 +426,7 @@ impl App {
             last_search: String::new(),
             flash: None,
             mouse_on: false,
+            press: None,
             suspend: false,
             big_drawn: Vec::new(),
             redraw: false,
@@ -1003,7 +1009,7 @@ impl App {
         self.focus == Focus::List && self.left_on.is_some() && self.left_on == self.selected_id()
     }
 
-    /// `c`: to the comments, and back to where that came from.
+    /// `C`: to the comments, and back to where that came from.
     fn toggle_comments(&mut self) {
         if self.focus == Focus::Reader && self.user_page.is_some() {
             self.flash = Some("No comments on someone's page".into());
@@ -1062,33 +1068,6 @@ impl App {
         }
     }
 
-    fn copy_link(&mut self, hn_page: bool) {
-        let reader_shown = self.focus == Focus::Reader || self.kept();
-        if let (true, Some(name)) = (reader_shown, &self.user_page) {
-            let url = crate::hn::user_url(name);
-            self.flash = Some(match clipboard::copy(&url) {
-                Ok(how) => format!("Copied {url} {how}"),
-                Err(e) => format!("Couldn't copy: {e}"),
-            });
-            return;
-        }
-        let id = match self.current_key() {
-            Some((id, _)) => Some(id),
-            None => self.selected_id(),
-        };
-        let Some(story) = id.and_then(|id| self.stories.get(&id)) else {
-            return;
-        };
-        let url = match &story.url {
-            Some(url) if !hn_page => url.clone(),
-            _ => story.hn_url(),
-        };
-        self.flash = Some(match clipboard::copy(&url) {
-            Ok(how) => format!("Copied {url} {how}"),
-            Err(e) => format!("Couldn't copy: {e}"),
-        });
-    }
-
     /// Keys that work the same in the list and the reader.
     fn view_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         match key.code {
@@ -1100,11 +1079,10 @@ impl App {
             }
             KeyCode::Char('>') => self.next_story(1),
             KeyCode::Char('<') => self.next_story(-1),
-            KeyCode::Char('c') if !ctrl => self.toggle_comments(),
+            KeyCode::Char('C') => self.toggle_comments(),
+            KeyCode::Char('c') if !ctrl => self.open_copy(),
             KeyCode::Char('w') if !ctrl => self.open_in_browser(false),
             KeyCode::Char('W') => self.open_in_browser(true),
-            KeyCode::Char('y') if !ctrl => self.copy_link(false),
-            KeyCode::Char('Y') => self.copy_link(true),
             KeyCode::Char('R') => self.reload(),
             KeyCode::Char('r') if !ctrl => self.reply_key(),
             KeyCode::Char('v') if !ctrl => self.upvote_key(),
@@ -1136,6 +1114,10 @@ impl App {
             return false;
         }
         self.flash = None;
+        // What was copied by dragging stays shown until the next key.
+        if let Some(doc) = self.current() {
+            doc.selection = None;
+        }
         if self.help {
             self.help = false;
             return false;
@@ -1252,7 +1234,7 @@ impl App {
                 self.list_in_reader = !self.list_in_reader;
                 return false;
             }
-            // On a comment, Space folds it; `C` and `E` fold every thread
+            // On a comment, Space folds it; `F` and `E` fold every thread
             // and unfold everything.
             KeyCode::Char(' ') if self.cursor_comment().is_some() => {
                 if let Some(id) = self.cursor_comment() {
@@ -1260,7 +1242,7 @@ impl App {
                 }
                 return false;
             }
-            KeyCode::Char('C') => {
+            KeyCode::Char('F') => {
                 self.fold_threads();
                 return false;
             }
@@ -1365,6 +1347,9 @@ impl App {
         self.draw_footer(f, footer);
         self.draw_picker(f);
         self.draw_post(f);
+        if let Some(nav::Prompt::Menu(menu)) = &mut self.prompt {
+            menu.draw(f);
+        }
         if self.help {
             draw_help(f);
         }
@@ -1681,7 +1666,7 @@ impl App {
                     let mut keys = vec![
                         ("↑↓", "move"),
                         ("→ tab", "read"),
-                        ("c", "comments"),
+                        ("C", "comments"),
                         ("space", "page"),
                         ("w", "open"),
                         ("/", "filter"),
@@ -1696,12 +1681,13 @@ impl App {
                 }
                 Focus::Reader => vec![
                     ("↑↓", "scroll"),
-                    ("c ] [", "comments"),
+                    ("C ] [", "comments"),
                     ("r", reply.as_str()),
                     ("^j ^k", "next story"),
                     ("/", "search"),
                     ("f", "follow"),
                     ("w", "open"),
+                    ("c", "copy"),
                     // Tab always goes to the list; ← and Esc go back first.
                     match (searching, self.history.is_empty()) {
                         (true, _) => ("esc", "clear search"),
@@ -1901,15 +1887,15 @@ fn draw_help(f: &mut Frame) {
         ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
         ("esc ← h", "Back to the list (esc quits there)"),
         ("q", "Quit"),
-        ("c", "To the comments, and back"),
+        ("C", "To the comments, and back"),
         ("] [", "Next / previous comment (or heading)"),
         ("} {", "Next / previous thread, skipping replies"),
         ("space", "On a comment: fold it and its replies, or unfold"),
-        ("C E", "Fold every thread to one line / unfold everything"),
+        ("F E", "Fold every thread to one line / unfold everything"),
         ("o", "Outline: the text follows as you move (/ filters)"),
         ("O", "Keep the outline open beside the story"),
         ("w W", "Open the story's link / its HN page in the browser"),
-        ("y Y", "Copy the story's link / its HN page"),
+        ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
         ("1-6", "Top, New, Best, Ask, Show, Jobs"),
         ("s", "Search all of HN's stories"),
         ("v", "Upvote the selected comment, or above the comments, the story"),

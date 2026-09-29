@@ -52,7 +52,7 @@ In the list:
 | `g` `G` | The first story, the last |
 | `Enter` `→` `l` | Read the story full screen |
 | `Tab` | Go to the story. On a terminal 130 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
-| `c` | Jump the preview to the comments, and back |
+| `C` | Jump the preview to the comments, and back |
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title; `Esc` clears it |
 | `1`–`6` | Top, New, Best, Ask, Show, Jobs |
@@ -66,8 +66,8 @@ Reading:
 |---|---|
 | `↑` `↓` `j` `k` | Scroll two lines (`scroll` in the settings); in the comments, go comment to comment. `J` `K`, a page |
 | `Space` `b`, `d` `u`, `g` `G` | Page, half page; top, bottom. On a comment, `Space` folds it |
-| `C` `E` | Fold every thread to a line; unfold everything |
-| `c` | To the comments, and back to where you were |
+| `F` `E` | Fold every thread to a line; unfold everything |
+| `C` | To the comments, and back to where you were |
 | `]` `[` | Next and previous comment, replies included (or heading, in the article) |
 | `}` `{` | Next and previous thread: top-level comments only |
 | `o` | The outline: the article's headings and each top-level comment. The story follows as you move through it; `/` filters it, `Enter` goes there |
@@ -83,7 +83,7 @@ Anywhere:
 | Key | |
 |---|---|
 | `w` `W` | Open the story's link, or its HN page, in the browser |
-| `y` `Y` | Copy the story's link, or its HN page |
+| `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article |
 | `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story |
 | `r` | Reply to the same: write it in your editor, see it, then post it |
 | `L` | Log in to HN, or out |
@@ -95,17 +95,17 @@ Anywhere:
 
 `Home` `End` `PgUp` `PgDn` do what they say. Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
-So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), follows a link, jumps through the scrollbar, or goes to a place in the outline.
+So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), follows a link, jumps through the scrollbar, or goes to a place in the outline. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
 
 ### Following links
 
-Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes.
+Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes (or `c` copies the address).
 
 ### Voting and replying
 
 `v` and `r` act as you on HN, so the first time, `L` (or `v` or `r` themselves) asks you to log in. lshn keeps HN's session, never your password: in the system's keyring (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux) or, where there isn't one, in `~/.lshn/session`, encrypted with a passphrase you choose, and asked for once a run.
 
-In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `C` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
+In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `F` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
 ### What it remembers
 
@@ -115,7 +115,7 @@ What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stori
 
 ### Where it comes from
 
-Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, with the address and `w` to open it in the browser or `y` to copy it.
+Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, with the address and `w` to open it in the browser or `c` to copy it.
 
 Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer.
 

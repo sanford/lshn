@@ -23,7 +23,7 @@ pub enum Comments<'a> {
     Loaded(&'a [Comment]),
 }
 
-/// The heading that starts the comments, which `c` jumps to.
+/// The heading that starts the comments, which `C` jumps to.
 pub const COMMENTS_HEADING: &str = "Comments";
 
 /// What the reader has done to a thread: the newest comment they'd seen
@@ -148,7 +148,7 @@ fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures:
             if let Some(url) = &story.url {
                 // The address, and right under it how to get there.
                 note.push_str(&format!(
-                    "\n>\n> [{}](<{}>)\\\n> `w` opens it in your browser, `y` copies it.",
+                    "\n>\n> [{}](<{}>)\\\n> `w` opens it in your browser, `c` copies it.",
                     escape(url),
                     link_target(url)
                 ));

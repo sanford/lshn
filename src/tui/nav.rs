@@ -2,6 +2,7 @@
 //! to the web or, for HN's own stories and people, to their pages here,
 //! with a history to go back through.
 
+use super::menu;
 use super::picker::{Outcome, Picker, Target};
 use super::{App, Asked, Focus};
 use crate::doc::Doc;
@@ -46,6 +47,8 @@ pub enum Prompt {
     },
     /// Confirming opening something outside lshn.
     Open(crate::open::Target),
+    /// What to copy.
+    Menu(super::menu::Menu<super::copy::Copy>),
 }
 
 /// What choosing a hinted link does.
@@ -231,14 +234,21 @@ impl App {
             | Prompt::Passphrase { .. }
             | Prompt::Logout { .. }
             | Prompt::Post { .. }) => self.act_prompt_key(p, key, ctrl),
-            Prompt::Open(target) => {
-                if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
+            Prompt::Open(target) => match key.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.flash = Some(match crate::open::open(&target) {
                         Ok(()) => format!("Opened {}", target.what),
                         Err(e) => format!("Couldn't open {}: {e}", target.what),
                     });
                 }
-            }
+                KeyCode::Char('c') => self.put(&target.target, &target.target),
+                _ => {}
+            },
+            Prompt::Menu(mut menu) => match menu.key(key) {
+                menu::Outcome::Stay => self.prompt = Some(Prompt::Menu(menu)),
+                menu::Outcome::Close => {}
+                menu::Outcome::Choose((text, what)) => self.put(&text, &what),
+            },
         }
         false
     }
@@ -450,6 +460,7 @@ impl App {
                 "  esc cancels".dim(),
             ]),
             Prompt::Pick(_) => Line::from(" ↑↓ move  / filter  ⏎ go  esc close  q quit".dim()),
+            Prompt::Menu(_) => Line::from(" its letter, or ↑↓ and ⏎, copies  esc close".dim()),
             // Their footers are act_footer's.
             Prompt::LoginUser { .. }
             | Prompt::LoginPassword { .. }
@@ -466,7 +477,7 @@ impl App {
                 " Open ".bold(),
                 Span::raw(target.what.clone()),
                 "? ".bold(),
-                "y/n  ".dim(),
+                "y/n, c copy  ".dim(),
                 Span::raw(target.target.clone()).dim(),
             ]),
         };
