@@ -15,7 +15,7 @@ use crate::doc::Doc;
 use crate::fetch::{self, Done, Fetcher, Got, Job, Waiting};
 use crate::hn::{Comment, Feed, Story, User};
 use crate::omarchy::Follow;
-use crate::store::{self, Cache, Seen, SeenStore};
+use crate::store::{self, Cache, Marked, Seen, SeenStore};
 use crate::story::{self, Comments};
 use crate::theme::{Choice, Mode, Theme};
 use crate::{safe, wrap};
@@ -71,7 +71,15 @@ pub struct Settings {
     pub feed: Feed,
     /// Sites and words whose stories aren't listed.
     pub mute: Vec<String>,
+    /// A story, comment or someone's page to open at the start.
+    pub open: Option<crate::hn::Link>,
+    /// Your username, from the config, for the replies to you.
+    pub user: Option<String>,
 }
+
+/// The replies to you, shown in the reader in place of someone's page: not
+/// a username, which has no spaces.
+pub(super) const REPLIES: &str = " replies";
 
 pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     // Previewing `auto` in the theme picker needs the terminal's background,
@@ -85,6 +93,8 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     let cache = Cache::new(dir.as_deref());
     cache.prune();
     let seen = SeenStore::load(dir.as_deref(), now());
+    let saved = Marked::load(dir.as_deref(), "saved", None, now());
+    let hid = Marked::load(dir.as_deref(), "hidden", Some(store::KEEP_HIDDEN), now());
     let mut app = App::new(theme, settings.max_width, Fetcher::start(cache), seen);
     app.choice = settings.choice;
     app.terminal_dark = terminal_dark;
@@ -96,7 +106,18 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     app.outline_pane = settings.outline;
     app.scroll = settings.scroll;
     app.mute = settings.mute;
+    app.saved = saved;
+    app.hid = hid;
+    app.me = settings.user;
+    // Whether there are new replies, for the header: if who you are is
+    // known without the keyring, which may ask to be unlocked.
+    if let Some(me) = app.known_me() {
+        app.send(Job::Replies(me), false);
+    }
     app.open_feed(settings.feed);
+    if let Some(link) = settings.open {
+        app.open_hn(link);
+    }
     let mut terminal = ratatui::init();
     if settings.images {
         app.picker = picker();
@@ -255,6 +276,20 @@ struct App {
     gone: HashSet<u64>,
     /// Sites and words whose stories aren't listed.
     mute: Vec<String>,
+    /// Stories saved to read later, and hidden from the lists.
+    saved: Marked,
+    hid: Marked,
+    /// The hidden stories are listed, to bring them back.
+    show_hidden: bool,
+    /// Your username, from the config.
+    me: Option<String>,
+    /// The replies to someone (you), and who.
+    replies: Option<Result<crate::hn::Replies, String>>,
+    replies_for: Option<String>,
+    /// The newest reply to you seen before, and the one the replies page
+    /// marks new from: the same, until it's been shown.
+    replies_seen: u64,
+    replies_mark: u64,
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
     articles: HashMap<u64, Article>,
     /// Articles' pictures, by story and place in the article.
@@ -283,6 +318,8 @@ struct App {
     history: Vec<nav::Back>,
     /// A story an HN link was followed to, to open once it's loaded.
     opening: Option<u64>,
+    /// The comment to go to in the story being opened.
+    opening_at: Option<u64>,
     /// Whether you're logged in to HN.
     auth: act::Auth,
     /// What's waiting for you to log in.
@@ -377,6 +414,14 @@ impl App {
             stories: HashMap::new(),
             gone: HashSet::new(),
             mute: Vec::new(),
+            saved: Marked::load(None, "saved", None, 0),
+            hid: Marked::load(None, "hidden", None, 0),
+            show_hidden: false,
+            me: None,
+            replies: None,
+            replies_for: None,
+            replies_seen: 0,
+            replies_mark: 0,
             threads: HashMap::new(),
             articles: HashMap::new(),
             figures: HashMap::new(),
@@ -393,6 +438,7 @@ impl App {
             user_page: None,
             history: Vec::new(),
             opening: None,
+            opening_at: None,
             auth: act::Auth::Unknown,
             pending: None,
             replying: None,
@@ -533,8 +579,12 @@ impl App {
         self.feed_error = None;
         self.filter.clear();
         self.typing = false;
-        self.asked.remove(&Asked::Feed(feed));
-        self.ask(Asked::Feed(feed), Job::Feed(feed), true);
+        if feed == Feed::Saved {
+            self.ids = Some(self.saved.newest_first());
+        } else {
+            self.asked.remove(&Asked::Feed(feed));
+            self.ask(Asked::Feed(feed), Job::Feed(feed), true);
+        }
         self.refresh();
         self.list.select(None);
         *self.list.offset_mut() = 0;
@@ -569,6 +619,10 @@ impl App {
         self.gone.clear();
         match self.search.clone() {
             Some(query) => self.send(Job::Search(query), true),
+            None if self.feed == Feed::Saved => {
+                self.ids = Some(self.saved.newest_first());
+                self.refresh();
+            }
             None => {
                 let feed = self.feed;
                 self.ask(Asked::Feed(feed), Job::Feed(feed), true);
@@ -594,7 +648,7 @@ impl App {
                             self.feed_error = None;
                         }
                         Err(e) if self.ids.is_some() => {
-                            self.flash = Some(format!("Showing saved stories: {e}"));
+                            self.flash = Some(format!("Showing the list from before: {e}"));
                         }
                         Err(e) => self.feed_error = Some(e),
                     }
@@ -611,16 +665,33 @@ impl App {
                 Got::Search(..) => {}
                 // A link to an HN item that isn't a story: a comment, say.
                 Got::Story(id, Ok(story)) if story.title.is_empty() => {
-                    if self.opening == Some(id) {
-                        self.opening = None;
-                        self.open_outside(&crate::hn::item_url(id));
+                    if self.opening == Some(id) && last {
+                        if story.parent.is_some() {
+                            // A comment: to its story, and there to it.
+                            self.send(Job::StoryOf(id), true);
+                        } else {
+                            self.opening = None;
+                            self.open_outside(&crate::hn::item_url(id));
+                        }
                     }
                 }
+                Got::StoryOf(comment, result) if self.opening == Some(comment) => {
+                    self.opening = None;
+                    match result {
+                        Ok(story) => self.open_comment(story, comment),
+                        Err(e) => self.flash = Some(format!("Couldn't open it: {e}")),
+                    }
+                }
+                Got::StoryOf(..) => {}
                 Got::Story(id, Ok(story)) if !story.dead && !story.deleted => {
                     self.stories.insert(id, story);
                     if self.opening == Some(id) {
                         self.opening = None;
+                        self.flash = None;
                         self.open_story_page(id);
+                        if let Some(comment) = self.opening_at.take() {
+                            self.doc((id, false)).go_to_comment(comment);
+                        }
                     }
                     self.rebuild(id);
                     if self.reading == Some(id) {
@@ -641,6 +712,9 @@ impl App {
                 Got::Thread(id, result) => {
                     self.threads.insert(id, result);
                     self.rebuild(id);
+                    if last {
+                        self.missing_comment(id);
+                    }
                     if self.reading == Some(id) {
                         self.note_seen(id);
                     }
@@ -654,6 +728,20 @@ impl App {
                     if let Some(doc) = self.user_docs.get_mut(&name) {
                         doc.replace(md);
                     }
+                }
+                Got::Replies(name, result) => {
+                    if self.replies_for.as_ref().is_some_and(|n| *n != name) {
+                        continue;
+                    }
+                    if self.replies_for.is_none() {
+                        self.replies_seen = store::replies_seen(store::dir().as_deref(), &name);
+                        self.replies_mark = self.replies_seen;
+                        self.replies_for = Some(name);
+                    }
+                    if !(result.is_err() && matches!(self.replies, Some(Ok(_)))) {
+                        self.replies = Some(result);
+                    }
+                    self.show_replies_update();
                 }
                 Got::LoggedIn(result) => self.logged_in(result),
                 Got::Upvoted(result) => self.upvoted(result),
@@ -909,8 +997,10 @@ impl App {
             self.shown = scored.into_iter().map(|(_, s)| s).collect();
         }
         let index = keep.and_then(|id| self.shown.iter().position(|s| s.id == id));
+        // One that's gone (hidden, say): the one that took its place.
+        let near = self.list.selected().filter(|_| keep.is_some()).map(|i| i.min(self.shown.len().saturating_sub(1)));
         self.list
-            .select(index.or((!self.shown.is_empty()).then_some(0)));
+            .select(index.or(near).or((!self.shown.is_empty()).then_some(0)).filter(|_| !self.shown.is_empty()));
     }
 
     /// Switches to the Omarchy theme's new colors, if it has changed.
@@ -1068,6 +1158,145 @@ impl App {
         }
     }
 
+    /// Once story `id`'s thread is here: if the comment it was opened at
+    /// isn't in it (dead, say, or too new for HN's search), says so, and
+    /// goes to the comments.
+    fn missing_comment(&mut self, id: u64) {
+        let Some(Ok(thread)) = self.threads.get(&id) else { return };
+        let Some(doc) = self.docs.get(&(id, false)) else { return };
+        let Some(comment) = doc.pending_comment() else { return };
+        if act::find(thread, comment).is_some() {
+            return;
+        }
+        let doc = self.docs.get_mut(&(id, false)).unwrap();
+        let line = comments_line(doc);
+        doc.give_up_comment(line);
+        self.flash = Some("That comment isn't in the thread HN's search has: dead, or too new".into());
+    }
+
+    /// Who you are, if it's known without asking the keyring: from the
+    /// config, the login, or the last one.
+    fn known_me(&self) -> Option<String> {
+        if let Some(me) = &self.me {
+            return Some(me.clone());
+        }
+        if let act::Auth::In(s) = &self.auth {
+            return Some(s.user().to_string());
+        }
+        store::user(store::dir().as_deref())
+    }
+
+    /// The reply to you with id `id`, if it's one.
+    pub(super) fn reply_to_you(&self, id: u64) -> Option<&crate::hn::Reply> {
+        let Some(Ok(replies)) = &self.replies else { return None };
+        replies.replies.iter().find(|r| r.id == id)
+    }
+
+    /// How many replies to you are new.
+    fn new_replies(&self) -> usize {
+        let Some(Ok(replies)) = &self.replies else { return 0 };
+        replies.replies.iter().filter(|r| r.id > self.replies_seen).count()
+    }
+
+    fn replies_shown(&self) -> bool {
+        (self.focus == Focus::Reader || self.kept()) && self.user_page.as_deref() == Some(REPLIES)
+    }
+
+    /// `i`: the replies to you.
+    fn replies_key(&mut self) {
+        if self.known_me().is_none() {
+            self.find_login();
+        }
+        let Some(me) = self.known_me() else {
+            self.flash = Some("Whose replies? L logs in, or user = \"you\" in ~/.lshn/config.toml says".into());
+            return;
+        };
+        if self.replies_for.as_ref() != Some(&me) {
+            self.replies = None;
+            self.replies_seen = store::replies_seen(store::dir().as_deref(), &me);
+            self.replies_for = Some(me.clone());
+        }
+        match self.here() {
+            Some(here) => self.history.push(here),
+            None => self.history.clear(),
+        }
+        self.replies_mark = self.replies_seen;
+        self.focus = Focus::Reader;
+        self.user_page = Some(REPLIES.into());
+        self.user_docs.remove(REPLIES);
+        self.user_doc(REPLIES).jump_to(0);
+        // Fetched afresh each time: it's what's new that's wanted.
+        self.send(Job::Replies(me), true);
+        self.show_replies_update();
+    }
+
+    /// The replies page, again, with what's come; and once it's been
+    /// shown, they're not new any more, though it keeps marking them.
+    fn show_replies_update(&mut self) {
+        if self.user_docs.contains_key(REPLIES) {
+            let md = self.replies_markdown();
+            self.user_docs.get_mut(REPLIES).unwrap().replace(md);
+        }
+        if !self.replies_shown() {
+            return;
+        }
+        let newest = match &self.replies {
+            Some(Ok(r)) => r.replies.iter().map(|r| r.id).max().unwrap_or(0),
+            _ => 0,
+        };
+        if newest > self.replies_seen
+            && let Some(me) = &self.replies_for
+        {
+            self.replies_seen = newest;
+            store::set_replies_seen(store::dir().as_deref(), me, newest);
+        }
+    }
+
+    fn replies_markdown(&self) -> String {
+        let me = self.replies_for.as_deref().unwrap_or("you");
+        story::replies_markdown(me, self.replies.as_ref(), self.replies_mark, now())
+    }
+
+    /// The story `S` and `x` act on: the one being read, or in the list,
+    /// the selected one.
+    fn story_here(&self) -> Option<u64> {
+        let reader_shown = self.focus == Focus::Reader || self.kept();
+        match self.current_key() {
+            _ if reader_shown && self.user_page.is_some() => None,
+            Some((id, _)) if reader_shown => Some(id),
+            _ => self.selected_id(),
+        }
+    }
+
+    /// `S`: saves the story to read later, or no longer.
+    fn save_key(&mut self) {
+        let Some(id) = self.story_here() else {
+            self.flash = Some("No story here to save".into());
+            return;
+        };
+        let title = self.stories.get(&id).map(|s| s.title.clone()).unwrap_or_default();
+        self.flash = Some(if self.saved.toggle(id, now()) {
+            format!("Saved “{}”: 7 lists what's saved", safe::printable(&title))
+        } else {
+            format!("No longer saved: “{}”", safe::printable(&title))
+        });
+    }
+
+    /// `x`: hides the story from the lists, or brings it back.
+    fn hide_key(&mut self) {
+        let Some(id) = self.story_here() else {
+            self.flash = Some("No story here to hide".into());
+            return;
+        };
+        let title = self.stories.get(&id).map(|s| s.title.clone()).unwrap_or_default();
+        self.flash = Some(if self.hid.toggle(id, now()) {
+            format!("Hid “{}”: X shows what's hidden", safe::printable(&title))
+        } else {
+            format!("Back in the lists: “{}”", safe::printable(&title))
+        });
+        self.refresh();
+    }
+
     /// Keys that work the same in the list and the reader.
     fn view_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
         match key.code {
@@ -1090,7 +1319,19 @@ impl App {
             KeyCode::Char('O') if self.focus == Focus::Reader => self.focus_outline(false),
             KeyCode::Char('O') => self.outline_pane = !self.outline_pane,
             KeyCode::Char('t') if !ctrl => self.open_themes(),
-            KeyCode::Char(c @ '1'..='6') => {
+            KeyCode::Char('S') => self.save_key(),
+            KeyCode::Char('i') if !ctrl => self.replies_key(),
+            KeyCode::Char('x') if !ctrl => self.hide_key(),
+            KeyCode::Char('X') => {
+                self.show_hidden = !self.show_hidden;
+                self.flash = Some(match (self.show_hidden, self.hid.stories.len()) {
+                    (true, 0) => "Nothing's hidden".into(),
+                    (true, n) => format!("Showing the {n} hidden: x brings one back; X hides them again"),
+                    (false, _) => "Hiding the hidden ones again".into(),
+                });
+                self.refresh();
+            }
+            KeyCode::Char(c @ '1'..='7') => {
                 let feed = Feed::ALL[c as usize - '1' as usize];
                 self.focus = Focus::List;
                 if feed != self.feed || self.search.is_some() {
@@ -1115,7 +1356,9 @@ impl App {
         }
         self.flash = None;
         // What was copied by dragging stays shown until the next key.
-        if let Some(doc) = self.current() {
+        if !matches!(self.prompt, Some(nav::Prompt::Select { .. }))
+            && let Some(doc) = self.current()
+        {
             doc.selection = None;
         }
         if self.help {
@@ -1379,6 +1622,13 @@ impl App {
             None => Span::raw("s Search").dim(),
         });
         title.push(Span::raw("  "));
+        title.push(match self.new_replies() {
+            _ if self.replies_shown() => Span::raw("i Replies").bold().underlined(),
+            0 => Span::raw("i Replies").dim(),
+            1 => Span::raw("i 1 new reply").yellow().bold(),
+            n => Span::raw(format!("i {n} new replies")).yellow().bold(),
+        });
+        title.push(Span::raw("  "));
         let used: usize = title.iter().map(|s| s.width()).sum();
         // Reading: which section the top of the screen is in.
         let section: Vec<String> = match self.focus {
@@ -1413,7 +1663,11 @@ impl App {
         let reader = self.focus == Focus::Reader || self.kept();
         let mut parts = Vec::new();
         if let (true, Some(name)) = (reader, &self.user_page) {
-            if !self.users.contains_key(name) {
+            if name == REPLIES {
+                if self.replies.is_none() {
+                    parts.push("replies");
+                }
+            } else if !self.users.contains_key(name) {
                 parts.push("their page");
             }
         } else {
@@ -1469,7 +1723,14 @@ impl App {
             .map(|s| {
                 let story = self.stories.get(&s.id);
                 let seen = self.seen.stories.get(&s.id);
-                title_lines(story, &s.hits, seen, width)
+                let mark = if self.hid.contains(s.id) {
+                    Mark::Hidden
+                } else if self.saved.contains(s.id) {
+                    Mark::Saved
+                } else {
+                    Mark::None
+                };
+                title_lines(story, &s.hits, seen, mark, width)
             })
             .collect();
         self.list_heights = items.iter().map(Vec::len).collect();
@@ -1518,7 +1779,10 @@ impl App {
 
     /// Whether a story is left out of the list: it's gone, or muted.
     fn hidden(&self, id: u64) -> bool {
-        self.gone.contains(&id)
+        // The saved stories are all listed, hidden or not.
+        let saved_list = self.feed == Feed::Saved && self.search.is_none();
+        let hid = self.hid.contains(id) && !self.show_hidden && !saved_list;
+        hid || self.gone.contains(&id)
             || self
                 .stories
                 .get(&id)
@@ -1670,7 +1934,7 @@ impl App {
                         ("space", "page"),
                         ("w", "open"),
                         ("/", "filter"),
-                        ("1-6", "lists"),
+                        ("1-7", "lists"),
                         ("s", "search"),
                     ];
                     if !self.filter.is_empty() {
@@ -1780,10 +2044,19 @@ fn now() -> u64 {
 /// highlighted, wrapped at spaces to fit `width`: titles are what the list is for, so they're
 /// never cut short. (The rest of what's known about a story is at the top
 /// of its page.)
+/// What's shown by a story's title: that you saved it, or hid it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mark {
+    None,
+    Saved,
+    Hidden,
+}
+
 fn title_lines(
     story: Option<&Story>,
     hits: &[u32],
     seen: Option<&Seen>,
+    mark: Mark,
     width: usize,
 ) -> Vec<Line<'static>> {
     let Some(story) = story else {
@@ -1793,10 +2066,10 @@ fn title_lines(
     let hit = Style::new().yellow().bold();
     // Stories you've read fade, and say how many comments they've had
     // since.
-    let plain = if seen.is_some() {
-        Style::new().dim()
-    } else {
-        Style::new()
+    let plain = match (seen, mark) {
+        (_, Mark::Hidden) => Style::new().dim().crossed_out(),
+        (Some(_), _) => Style::new().dim(),
+        _ => Style::new(),
     };
     let title = safe::printable(&story.title);
     let mut chars: Vec<(char, Style)> = title
@@ -1858,10 +2131,11 @@ fn title_lines(
         .map(|(n, row)| {
             // A dot marks where each title starts; the rest of a wrapped
             // title lines up with its text, not the dot.
-            let lead = if n == 0 {
-                Span::raw(" • ").dim()
-            } else {
-                Span::raw(INDENT)
+            let lead = match (n, mark) {
+                (0, Mark::Saved) => Span::raw(" ★ ").yellow(),
+                (0, Mark::Hidden) => Span::raw(" × ").dim(),
+                (0, Mark::None) => Span::raw(" • ").dim(),
+                _ => Span::raw(INDENT),
             };
             let mut spans: Vec<Span> = vec![lead];
             for &(c, style) in row {
@@ -1896,8 +2170,11 @@ fn draw_help(f: &mut Frame) {
         ("O", "Keep the outline open beside the story"),
         ("w W", "Open the story's link / its HN page in the browser"),
         ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
-        ("1-6", "Top, New, Best, Ask, Show, Jobs"),
-        ("s", "Search all of HN's stories"),
+        ("1-7", "Top, New, Best, Ask, Show, Jobs; Saved"),
+        ("s", "Search all of HN's stories (or open an HN link or id)"),
+        ("i", "Replies to you, to your latest comments and stories"),
+        ("S", "Save the story to read later, or no longer"),
+        ("x X", "Hide the story from the lists, or bring it back / show the hidden"),
         ("v", "Upvote the selected comment, or above the comments, the story"),
         ("r", "Reply to the selected comment, or above the comments, the story"),
         ("L", "Log in to HN, or out"),
@@ -2084,7 +2361,7 @@ mod tests {
             ..Story::default()
         };
         let texts =
-            |width| -> Vec<String> { title_lines(Some(&story), &[], None, width).iter().map(text).collect() };
+            |width| -> Vec<String> { title_lines(Some(&story), &[], None, Mark::None, width).iter().map(text).collect() };
         assert_eq!(texts(40), [" • A rather long title for a story"]);
         assert_eq!(texts(22), [" • A rather long title", "   for a story"]);
         // A word too long for a row breaks mid-word.
@@ -2122,12 +2399,12 @@ mod tests {
             newest: 5,
             count: 9,
         };
-        let lines = title_lines(Some(&story), &[], Some(&seen), 40);
+        let lines = title_lines(Some(&story), &[], Some(&seen), Mark::None, 40);
         assert_eq!(text(&lines[0]), " • Title +3");
         let title = lines[0].spans.iter().find(|s| s.content.contains("Title")).unwrap();
         assert!(title.style.add_modifier.contains(Modifier::DIM));
         let caught_up = Seen { count: 12, ..seen };
-        assert_eq!(text(&title_lines(Some(&story), &[], Some(&caught_up), 40)[0]), " • Title");
+        assert_eq!(text(&title_lines(Some(&story), &[], Some(&caught_up), Mark::None, 40)[0]), " • Title");
     }
 
     /// Reading a story remembers it, and its comments stay marked new

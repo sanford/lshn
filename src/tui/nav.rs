@@ -49,6 +49,8 @@ pub enum Prompt {
     Open(crate::open::Target),
     /// What to copy.
     Menu(super::menu::Menu<super::copy::Copy>),
+    /// Selecting lines to copy, from `anchor` to `cursor`.
+    Select { anchor: usize, cursor: usize },
 }
 
 /// What choosing a hinted link does.
@@ -218,7 +220,13 @@ impl App {
             },
             Prompt::SearchHn { mut query } => match key.code {
                 KeyCode::Esc => {}
-                KeyCode::Enter if !query.trim().is_empty() => self.search_hn(query.trim().to_string()),
+                // An HN link or an item's id (a long number: not a year, say)
+                // opens it; anything else is searched for.
+                KeyCode::Enter => match hn::parse(&query) {
+                    Some(link) if query.trim().len() >= 6 => self.open_hn(link),
+                    _ if query.trim().is_empty() => {}
+                    _ => self.search_hn(query.trim().to_string()),
+                },
                 KeyCode::Backspace => {
                     query.pop();
                     self.prompt = Some(Prompt::SearchHn { query });
@@ -247,7 +255,10 @@ impl App {
             Prompt::Menu(mut menu) => match menu.key(key) {
                 menu::Outcome::Stay => self.prompt = Some(Prompt::Menu(menu)),
                 menu::Outcome::Close => {}
-                menu::Outcome::Choose((text, what)) => self.put(&text, &what),
+                menu::Outcome::Choose(choice) => self.choose(choice),
+            },
+            Prompt::Select { anchor, cursor } => {
+                self.select_key(key, anchor, cursor);
             },
         }
         false
@@ -320,9 +331,14 @@ impl App {
 
     /// Opens an HN link here: a story (once it's loaded, if it isn't), or
     /// someone's page. A link to the story on screen goes to its comments.
-    fn open_hn(&mut self, link: Link) {
+    pub(super) fn open_hn(&mut self, link: Link) {
         match link {
             Link::User(name) => self.open_user(name),
+            // A reply to you: its story's known.
+            Link::Item(id) if self.reply_to_you(id).and_then(|r| r.story_id).is_some() => {
+                let story = self.reply_to_you(id).and_then(|r| r.story_id).unwrap_or(id);
+                self.open_comment(story, id);
+            }
             Link::Item(id) => {
                 let on_screen = self.user_page.is_none()
                     && self.current_key().is_some_and(|(shown, _)| shown == id);
@@ -336,6 +352,7 @@ impl App {
                     self.open_story_page(id);
                 } else {
                     self.opening = Some(id);
+                    self.opening_at = None;
                     self.flash = Some("Opening…".into());
                     self.ask(Asked::Story(id), Job::Story(id), true);
                 }
@@ -343,8 +360,29 @@ impl App {
         }
     }
 
+    /// Opens story `story` at comment `comment`: in place, if it's the
+    /// one being read.
+    pub(super) fn open_comment(&mut self, story: u64, comment: u64) {
+        let reading = self.focus == Focus::Reader
+            && self.user_page.is_none()
+            && self.reading == Some(story);
+        if reading {
+            self.flash = None;
+            self.doc((story, false)).go_to_comment(comment);
+        } else if self.stories.contains_key(&story) {
+            self.flash = None;
+            self.open_story_page(story);
+            self.doc((story, false)).go_to_comment(comment);
+        } else {
+            self.opening = Some(story);
+            self.opening_at = Some(comment);
+            self.flash = Some("Opening…".into());
+            self.ask(Asked::Story(story), Job::Story(story), true);
+        }
+    }
+
     /// Where the reader is now, to come back to: `None` from the list.
-    fn here(&mut self) -> Option<Back> {
+    pub(super) fn here(&mut self) -> Option<Back> {
         if self.focus != Focus::Reader {
             return None;
         }
@@ -387,7 +425,11 @@ impl App {
     /// Someone's page as a document, made the first time it's needed.
     pub(super) fn user_doc(&mut self, name: &str) -> &mut Doc {
         if !self.user_docs.contains_key(name) {
-            let md = crate::story::user_markdown(name, self.users.get(name), super::now());
+            let md = if name == super::REPLIES {
+                self.replies_markdown()
+            } else {
+                crate::story::user_markdown(name, self.users.get(name), super::now())
+            };
             self.user_docs.insert(name.to_string(), Doc::new(md));
         }
         self.user_docs.get_mut(name).unwrap()
@@ -461,6 +503,7 @@ impl App {
             ]),
             Prompt::Pick(_) => Line::from(" ↑↓ move  / filter  ⏎ go  esc close  q quit".dim()),
             Prompt::Menu(_) => Line::from(" its letter, or ↑↓ and ⏎, copies  esc close".dim()),
+            Prompt::Select { .. } => self.select_footer(),
             // Their footers are act_footer's.
             Prompt::LoginUser { .. }
             | Prompt::LoginPassword { .. }
@@ -471,7 +514,7 @@ impl App {
                 " Search HN: ".bold(),
                 Span::raw(query.clone()),
                 "▏".slow_blink(),
-                "  ⏎ search  esc cancel".dim(),
+                "  ⏎ search (an HN link or id: open it)  esc cancel".dim(),
             ]),
             Prompt::Open(target) => Line::from(vec![
                 " Open ".bold(),

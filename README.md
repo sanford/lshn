@@ -35,7 +35,8 @@ While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1 [ARGS]` on Windows) builds
 
 ```sh
 lshn                 # the front page
-lshn best            # ...or new, best, ask, show, jobs
+lshn best            # ...or new, best, ask, show, jobs, saved
+lshn 12345           # open a story or comment: its id, or its link on HN
 lshn 12345 | less -R # not a terminal: print a story, its article and comments
 lshn | head          # not a terminal: list the front page (points, comments, title, link)
 ```
@@ -55,8 +56,10 @@ In the list:
 | `C` | Jump the preview to the comments, and back |
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title; `Esc` clears it |
-| `1`–`6` | Top, New, Best, Ask, Show, Jobs |
-| `s` | Search all of HN's stories: the matches, best first, become the list |
+| `1`–`7` | Top, New, Best, Ask, Show, Jobs; and Saved, the stories you've saved, the latest first |
+| `s` | Search all of HN's stories: the matches, best first, become the list. An HN link or an item's id opens it instead |
+| `S` | Save the story to read later (★ in the lists), or no longer |
+| `x` | Hide the story from the lists, for good (90 days, anyway); `X` shows the hidden ones, crossed out, and `x` brings one back |
 | `O` | Keep the outline beside the preview, or not |
 | `q` `Esc` | Quit |
 
@@ -83,9 +86,10 @@ Anywhere:
 | Key | |
 |---|---|
 | `w` `W` | Open the story's link, or its HN page, in the browser |
-| `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article |
+| `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article. `v` there selects lines from the keyboard: `j` `k` for more or less, then `c` |
 | `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story |
 | `r` | Reply to the same: write it in your editor, see it, then post it |
+| `i` | Replies to you (see below) |
 | `L` | Log in to HN, or out |
 | `R` | Reload |
 | `t` | Pick a color theme |
@@ -99,7 +103,7 @@ So does the mouse: the wheel scrolls whatever's under it, a click selects a stor
 
 ### Following links
 
-Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes (or `c` copies the address).
+Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments; a link to a comment opens its story there, with the comment selected. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes (or `c` copies the address).
 
 ### Voting and replying
 
@@ -107,11 +111,17 @@ Every author's name is a link: follow it (`f`, or click) for their page — karm
 
 In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `F` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line; save and quit, and it's shown to you to post (`y`), edit again (`e`), or keep for later (`n`). Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
+### Replies to you
+
+`i` shows the replies to your latest 30 comments and stories, newest first, each with what it answers. The header says when there are new ones (`i 3 new replies`), checked when lshn starts; they're marked `new` on the page, and aren't new any more once you've seen it. As in a thread, `j` and `k` go from one to the next, and `r` and `v` reply to the one selected or upvote it; its age is a link to it in its story.
+
+lshn knows who you are once you've logged in (it keeps your username, which is public on HN, in `~/.lshn/user`), or from `user = "you"` in the settings, for seeing your replies without logging in.
+
 ### What it remembers
 
 Stories you've opened fade in the list, and when they've had comments since, say how many: `+12`. Open one again and its new comments are marked `new`, and the comments' heading counts them. They stay marked while you read, and aren't new any more once you move on.
 
-What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stories and comments show the moment it starts, and are replaced as fresh ones arrive, without losing your place. Without a connection, what's saved is still there to read. Articles are fetched once. What you've read is in `~/.lshn/seen.json`, for 90 days.
+What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stories and comments show the moment it starts, and are replaced as fresh ones arrive, without losing your place. Without a connection, what's saved is still there to read. Articles are fetched once. What you've read is in `~/.lshn/seen.json`, for 90 days. Stories you've saved are in `~/.lshn/saved.json`, and those you've hidden in `~/.lshn/hidden.json`, for 90 days.
 
 ### Where it comes from
 
@@ -140,6 +150,7 @@ images = false          # don't show articles' pictures
 mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
                                   # or with these words or phrases in their titles
 big-titles = false      # titles at the text's size, even in Kitty
+user = "you"            # whose replies i shows, without logging in
 ```
 
 `lshn --edit-config` opens it in your editor, starting one with every setting listed, and says if what you saved can't be read. `--config FILE` reads another file instead.

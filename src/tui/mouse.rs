@@ -26,9 +26,9 @@ impl App {
                 match menu.click(x, y) {
                     super::menu::Outcome::Stay => {}
                     super::menu::Outcome::Close => self.prompt = None,
-                    super::menu::Outcome::Choose((text, what)) => {
+                    super::menu::Outcome::Choose(choice) => {
                         self.prompt = None;
-                        self.put(&text, &what);
+                        self.choose(choice);
                     }
                 }
             }
@@ -88,6 +88,10 @@ impl App {
         match m.kind {
             MouseEventKind::Down(MouseButton::Left) => {
                 self.press = None;
+                // A click ends a selection made with the keys.
+                if matches!(self.prompt, Some(Prompt::Select { .. })) {
+                    self.prompt = None;
+                }
                 let Some(doc) = self.current() else { return false };
                 doc.selection = None;
                 if !doc.contains(x, y) {

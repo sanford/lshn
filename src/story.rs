@@ -9,7 +9,7 @@ use crate::article::{self, Article};
 use crate::figure;
 use std::collections::HashSet;
 use std::ops::Range;
-use crate::hn::{self, Comment, Story, User};
+use crate::hn::{self, Comment, Replies, Story, User};
 
 /// Replies nest this deep, then stay there, so deep threads keep room.
 const MAX_DEPTH: usize = 10;
@@ -395,6 +395,77 @@ pub fn user_markdown(name: &str, user: Option<&Result<User, String>>, now: u64) 
     md
 }
 
+/// The replies to your latest stories and comments, newest first: each
+/// with what it answers, in a bar like a comment in a thread, so `j` and
+/// `k` go from one to the next. Those newer than `seen` are marked new.
+pub fn replies_markdown(name: &str, replies: Option<&Result<Replies, String>>, seen: u64, now: u64) -> String {
+    let mut md = format!(
+        "# Replies to {}\n\nTo your latest 30 comments and stories, newest first · [on HN](<{}>)\n\n",
+        escape(name),
+        hn::threads_url(name)
+    );
+    let replies = match replies {
+        None => return md + "*Loading…*\n",
+        Some(Err(e)) => {
+            return md + &format!("> [!NOTE] Couldn't get them\n> {}\n", escape(&capitalized(e)));
+        }
+        Some(Ok(replies)) => replies,
+    };
+    if replies.replies.is_empty() {
+        md.push_str("*None yet.*\n");
+    }
+    for reply in &replies.replies {
+        let when = format!("[{}](<{}> \"muted\")", ago(reply.time, now), hn::item_url(reply.id));
+        let new = if reply.id > seen { " · `new`" } else { "" };
+        let who = if reply.by.is_empty() { "*\\[deleted\\]*".to_string() } else { author(&reply.by) };
+        let mut body = format!("### {who} · {when}{new}\n\n");
+        let yours = replies.yours.iter().find(|p| p.id == reply.parent);
+        let story = match (reply.story_id, &reply.story_title) {
+            (Some(id), Some(title)) => format!("[{}](<{}>)", escape(title), hn::item_url(id)),
+            _ => "a story".into(),
+        };
+        match yours {
+            Some(post) if post.title.is_some() => body.push_str(&format!("On your story {story}\n\n")),
+            Some(post) => {
+                body.push_str(&format!("To your comment on {story}:\n\n"));
+                body.push_str(&format!("> *{}*\n\n", excerpt(post.text.as_deref().unwrap_or_default())));
+            }
+            None => body.push_str(&format!("On {story}\n\n")),
+        }
+        body.push_str(&html_to_md(&reply.text));
+        md.push_str(&crate::render::comment_marker(reply.id, 0));
+        md.push_str("\n\n");
+        for line in body.trim_end().lines() {
+            md.push_str(if line.is_empty() { ">" } else { "> " });
+            md.push_str(line);
+            md.push('\n');
+        }
+        md.push('\n');
+    }
+    md
+}
+
+/// The start of a comment, as Markdown on one line: its first 160 or so
+/// characters, cut between words, with addresses as links.
+fn excerpt(html: &str) -> String {
+    let text = html_to_text(html);
+    let mut out = Vec::new();
+    let mut len = 0;
+    for word in text.split_whitespace() {
+        if len > 160 {
+            out.push("…".to_string());
+            break;
+        }
+        len += word.chars().count() + 1;
+        out.push(if word.starts_with("http://") || word.starts_with("https://") {
+            format!("<{word}>")
+        } else {
+            escape(word)
+        });
+    }
+    out.join(" ")
+}
+
 /// "3h ago", from seconds since the epoch.
 pub fn ago(then: u64, now: u64) -> String {
     const MIN: u64 = 60;
@@ -674,6 +745,29 @@ mod tests {
         assert_eq!(decode("a &amp; b &#x27;c&#39; &bogus; &"), "a & b 'c' &bogus; &");
         // Not a reference, just before text that isn't ASCII.
         assert_eq!(decode("Q&A’s ’’’’ &amp;"), "Q&A’s ’’’’ &");
+    }
+
+    #[test]
+    fn replies_say_what_they_answer_and_which_are_new() {
+        let replies = Replies {
+            replies: vec![
+                hn::Reply { id: 30, by: "bob".into(), text: "Agreed.".into(), time: 0, parent: 10, story_id: Some(1), story_title: Some("A story".into()) },
+                hn::Reply { id: 20, by: "carol".into(), text: "Nice work".into(), time: 0, parent: 1, story_id: Some(1), story_title: Some("A story".into()) },
+            ],
+            yours: vec![
+                hn::Post { id: 10, text: Some("I think <i>so</i>".into()), story_id: Some(1), ..Default::default() },
+                hn::Post { id: 1, title: Some("A story".into()), ..Default::default() },
+            ],
+        };
+        let md = replies_markdown("me", Some(&Ok(replies)), 25, 0);
+        assert!(md.starts_with("# Replies to me\n"), "{md}");
+        assert!(md.contains("> To your comment on [A story]"), "{md}");
+        assert!(md.contains("> > *I think so*"), "{md}");
+        assert_eq!(excerpt("see https://x.com/a_b.c and *this*"), "see <https://x.com/a_b.c> and \\*this\\*");
+        assert!(md.contains("> On your story [A story]"), "{md}");
+        assert_eq!(md.matches("`new`").count(), 1, "only the one after 25: {md}");
+        let doc = crate::render::render(&md, 60, &crate::theme::Theme::plain(), None, None);
+        assert_eq!(doc.comments.len(), 2, "j and k go from one to the next");
     }
 
     #[test]

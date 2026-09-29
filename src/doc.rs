@@ -69,6 +69,9 @@ pub struct Doc {
     pub hints: Vec<Hint>,
     /// A heading to jump to once the document is laid out.
     pending_anchor: Option<String>,
+    /// A comment to put the cursor on once it's there: its thread may
+    /// still be coming.
+    pending_comment: Option<u64>,
     /// A search match to jump to once the document is laid out: its source
     /// line and the query.
     pending_match: Option<(usize, String)>,
@@ -115,6 +118,7 @@ impl Doc {
             search: None,
             hints: Vec::new(),
             pending_anchor: None,
+            pending_comment: None,
             pending_match: None,
             keep: None,
             lines: Vec::new(),
@@ -265,6 +269,7 @@ impl Doc {
         self.layout(width.max(1), theme);
         self.height = area.height.into();
         self.top = self.top.min(self.max_top());
+        self.place_pending_comment();
         self.follow_view();
         self.draw_rendered(f, area);
     }
@@ -484,6 +489,58 @@ impl Doc {
             self.scroll_by(1);
         }
         self.selection = Some((from, self.spot_at(x, y)));
+    }
+
+    /// Whether line `i` has any text of its own, not just bars.
+    fn has_text(&self, i: usize) -> bool {
+        let line = &self.lines[i];
+        !self.column_text(i, line.body.0, line.body.1).trim().is_empty()
+    }
+
+    /// The line with text `by` lines with text on from line `i`: up with a
+    /// negative `by`; with 0, `i` or the nearest after it (or before, at
+    /// the end). As far as there is.
+    pub fn text_line(&self, i: usize, by: isize) -> usize {
+        let last = self.lines.len().saturating_sub(1);
+        let mut at = i.min(last);
+        if by == 0 {
+            return (at..=last)
+                .find(|&l| self.has_text(l))
+                .or_else(|| (0..at).rev().find(|&l| self.has_text(l)))
+                .unwrap_or(at);
+        }
+        for _ in 0..by.unsigned_abs() {
+            let next = if by > 0 {
+                (at + 1..=last).find(|&l| self.has_text(l))
+            } else {
+                (0..at).rev().find(|&l| self.has_text(l))
+            };
+            match next {
+                Some(l) => at = l,
+                None => break,
+            }
+        }
+        at
+    }
+
+    /// Where selecting with the keys starts: the first line of the comment
+    /// the cursor's on, after its header, or the first on screen.
+    pub fn select_start(&self) -> Option<usize> {
+        let from = self.focused().map_or(self.top, |c| c.start + 1);
+        let line = self.text_line(from, 0);
+        (!self.lines.is_empty() && self.has_text(line)).then_some(line)
+    }
+
+    /// Selects lines `a` to `b`, either way round, whole, and shows `b`.
+    pub fn select_lines(&mut self, a: usize, b: usize) {
+        const END: usize = usize::MAX / 2;
+        self.selection = Some(((a.min(b), 0), (a.max(b), END)));
+        let height = self.height.max(1);
+        if b < self.top {
+            self.jump_to(b);
+        } else if b >= self.top + height {
+            self.jump_to((b + 1).saturating_sub(height));
+        }
     }
 
     /// The selection, its first spot first.
@@ -759,6 +816,37 @@ impl Doc {
 
     /// Jumps to the heading with anchor `slug`, now or, if the document
     /// hasn't been laid out yet, as soon as it is.
+    /// Puts the cursor on comment `id`, a little way down the screen with
+    /// what it answers above, now or once it's there.
+    pub fn go_to_comment(&mut self, id: u64) {
+        self.pending_comment = Some(id);
+    }
+
+    /// The comment the cursor's to go to, once it's there.
+    pub fn pending_comment(&self) -> Option<u64> {
+        self.pending_comment
+    }
+
+    /// Stops waiting for comment it was to go to: it isn't coming. To the
+    /// comments instead.
+    pub fn give_up_comment(&mut self, comments: Option<usize>) {
+        if self.pending_comment.take().is_some()
+            && let Some(line) = comments
+        {
+            self.jump_to(line);
+        }
+    }
+
+    fn place_pending_comment(&mut self) {
+        let Some(id) = self.pending_comment else { return };
+        let Some(c) = self.comments.iter().find(|c| c.id == id).copied() else {
+            return;
+        };
+        self.pending_comment = None;
+        self.cursor = Some(id);
+        self.top = c.start.saturating_sub(self.height / 4).min(self.max_top());
+    }
+
     pub fn go_to_anchor(&mut self, slug: &str) {
         if self.width == 0 {
             self.pending_anchor = Some(slug.to_string());
@@ -1148,6 +1236,20 @@ mod tests {
         let bob = doc.lines.iter().position(|l| l.text().contains("bob")).unwrap();
         let text = doc.text_between((first, 4), (bob, usize::MAX));
         assert!(text.ends_with("lines.\n\n  bob · 2h ago\n"), "{text:?}");
+    }
+
+    #[test]
+    fn selects_whole_lines_with_text_from_the_keys() {
+        let md = "# T\n\n> ### ann · 1h ago\n>\n> one\n>\n> two\n";
+        let mut doc = Doc::new(md.into());
+        doc.layout(30, &Theme::new(crate::theme::Mode::Dark, true, None));
+        doc.height = 20;
+        let one = doc.lines.iter().position(|l| l.text().contains("one")).unwrap();
+        let two = doc.lines.iter().position(|l| l.text().contains("two")).unwrap();
+        assert_eq!(doc.text_line(one, 1), two, "over the blank line between");
+        assert_eq!(doc.text_line(two, 1), two, "no further than the end");
+        doc.select_lines(two, one);
+        assert_eq!(doc.selected_text().unwrap(), "one\n\ntwo\n");
     }
 
     /// The article arriving above the comments mustn't move the comment

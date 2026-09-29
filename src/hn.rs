@@ -10,7 +10,8 @@ const ALGOLIA: &str = "https://hn.algolia.com/api/v1";
 /// The biggest threads run to several megabytes.
 const MAX_JSON: u64 = 64 << 20;
 
-/// The lists on HN's front page, and the keys that pick them.
+/// The lists on HN's front page, and the keys that pick them; and the
+/// stories you've saved, which are kept here, not on HN.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum Feed {
@@ -20,16 +21,18 @@ pub enum Feed {
     Ask,
     Show,
     Jobs,
+    Saved,
 }
 
 impl Feed {
-    pub const ALL: [Feed; 6] = [
+    pub const ALL: [Feed; 7] = [
         Feed::Top,
         Feed::New,
         Feed::Best,
         Feed::Ask,
         Feed::Show,
         Feed::Jobs,
+        Feed::Saved,
     ];
 
     pub fn name(self) -> &'static str {
@@ -40,18 +43,20 @@ impl Feed {
             Feed::Ask => "Ask",
             Feed::Show => "Show",
             Feed::Jobs => "Jobs",
+            Feed::Saved => "Saved",
         }
     }
 
-    fn endpoint(self) -> &'static str {
-        match self {
+    fn endpoint(self) -> Option<&'static str> {
+        Some(match self {
             Feed::Top => "topstories",
             Feed::New => "newstories",
             Feed::Best => "beststories",
             Feed::Ask => "askstories",
             Feed::Show => "showstories",
             Feed::Jobs => "jobstories",
-        }
+            Feed::Saved => return None,
+        })
     }
 }
 
@@ -74,6 +79,8 @@ pub struct Story {
     pub text: Option<String>,
     pub dead: bool,
     pub deleted: bool,
+    /// What a comment replies to; `None` for a story.
+    pub parent: Option<u64>,
 }
 
 impl Story {
@@ -156,7 +163,8 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
 
 /// The ids of a feed's stories, in order.
 pub fn feed(feed: Feed) -> Result<Vec<u64>, String> {
-    get_json(&format!("{FIREBASE}/{}.json", feed.endpoint()))
+    let endpoint = feed.endpoint().ok_or("the saved stories are kept here, not on HN")?;
+    get_json(&format!("{FIREBASE}/{endpoint}.json"))
 }
 
 pub fn story(id: u64) -> Result<Story, String> {
@@ -226,6 +234,11 @@ pub fn is_username(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
+/// HN's page of the replies to someone.
+pub fn threads_url(name: &str) -> String {
+    format!("https://news.ycombinator.com/threads?id={name}")
+}
+
 pub fn user_url(name: &str) -> String {
     format!("https://news.ycombinator.com/user?id={name}")
 }
@@ -237,18 +250,17 @@ pub fn user(name: &str) -> Result<User, String> {
     }
     let user: Option<User> = get_json(&format!("{FIREBASE}/user/{name}.json"))?;
     let mut user = user.ok_or_else(|| format!("No user {name}"))?;
-    let hits: PostHits = agent()
-        .get(format!("{ALGOLIA}/search_by_date"))
-        .query("tags", format!("author_{name}"))
-        .query("hitsPerPage", "30")
-        .call()
-        .map_err(|e| e.to_string())?
-        .body_mut()
-        .with_config()
-        .limit(MAX_JSON)
-        .read_json()
-        .map_err(|e| e.to_string())?;
-    user.recent = hits
+    user.recent = recent(name)?;
+    Ok(user)
+}
+
+/// Someone's latest 30 stories and comments, newest first, from Algolia.
+fn recent(name: &str) -> Result<Vec<Post>, String> {
+    let hits: PostHits = search_by_date(&[
+        ("tags", format!("author_{name}")),
+        ("hitsPerPage", "30".into()),
+    ])?;
+    Ok(hits
         .hits
         .into_iter()
         .filter_map(|h| {
@@ -264,8 +276,121 @@ pub fn user(name: &str) -> Result<User, String> {
                 story_title: h.story_title,
             })
         })
+        .collect())
+}
+
+/// Algolia's search, newest first, with `query`.
+fn search_by_date<T: serde::de::DeserializeOwned>(query: &[(&str, String)]) -> Result<T, String> {
+    let mut request = agent().get(format!("{ALGOLIA}/search_by_date"));
+    for (key, value) in query {
+        request = request.query(key, value);
+    }
+    request
+        .call()
+        .map_err(|e| e.to_string())?
+        .body_mut()
+        .with_config()
+        .limit(MAX_JSON)
+        .read_json()
+        .map_err(|e| e.to_string())
+}
+
+/// A reply to something of yours.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reply {
+    pub id: u64,
+    pub by: String,
+    /// As HTML.
+    pub text: String,
+    pub time: u64,
+    /// What it answers: one of yours.
+    pub parent: u64,
+    pub story_id: Option<u64>,
+    pub story_title: Option<String>,
+}
+
+/// The replies to your latest stories and comments, and those.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Replies {
+    /// Newest first.
+    pub replies: Vec<Reply>,
+    pub yours: Vec<Post>,
+}
+
+#[derive(Deserialize)]
+struct ReplyHit {
+    #[serde(rename = "objectID")]
+    id: String,
+    author: Option<String>,
+    comment_text: Option<String>,
+    #[serde(default)]
+    created_at_i: u64,
+    parent_id: Option<u64>,
+    story_id: Option<u64>,
+    story_title: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReplyHits {
+    hits: Vec<ReplyHit>,
+}
+
+/// The replies to `name`'s latest 30 stories and comments, from Algolia:
+/// those, then in one search, the comments whose parent is one of them.
+pub fn replies(name: &str) -> Result<Replies, String> {
+    if !is_username(name) {
+        return Err(format!("{name} isn't a username"));
+    }
+    let yours = recent(name)?;
+    if yours.is_empty() {
+        return Ok(Replies::default());
+    }
+    let parents: Vec<String> = yours.iter().map(|p| format!("parent_id={}", p.id)).collect();
+    let hits: ReplyHits = search_by_date(&[
+        ("tags", "comment".into()),
+        ("numericFilters", format!("({})", parents.join(","))),
+        ("hitsPerPage", "60".into()),
+    ])?;
+    let replies = hits
+        .hits
+        .into_iter()
+        .filter(|h| h.author.as_deref() != Some(name))
+        .filter_map(|h| {
+            Some(Reply {
+                id: h.id.parse().ok()?,
+                by: h.author.unwrap_or_default(),
+                text: h.comment_text?,
+                time: h.created_at_i,
+                parent: h.parent_id?,
+                story_id: h.story_id,
+                story_title: h.story_title,
+            })
+        })
         .collect();
-    Ok(user)
+    Ok(Replies { replies, yours })
+}
+
+#[derive(Deserialize)]
+struct ItemStory {
+    story_id: Option<u64>,
+}
+
+/// The story comment `id` is on, from Algolia.
+pub fn story_of(id: u64) -> Result<u64, String> {
+    let item: ItemStory = get_json(&format!("{ALGOLIA}/items/{id}"))?;
+    item.story_id.ok_or_else(|| format!("No story has item {id}"))
+}
+
+/// What's typed or pasted to open something on HN: a link to a story, a
+/// comment or someone, a link without its `https://`, or an item's id.
+pub fn parse(text: &str) -> Option<Link> {
+    let text = text.trim();
+    if let Ok(id) = text.parse() {
+        return Some(Link::Item(id));
+    }
+    link(text).or_else(|| link(&format!("https://{text}")))
 }
 
 /// Where a link on HN goes, when it's somewhere lshn can show.
@@ -389,6 +514,10 @@ mod tests {
         assert_eq!(link("https://news.ycombinator.com/user?id=a%20b"), None);
         assert_eq!(link("https://news.ycombinator.com/newest"), None);
         assert_eq!(link("https://example.com/item?id=1"), None);
+        assert_eq!(parse(" 49898502 "), Some(Link::Item(49898502)));
+        assert_eq!(parse("news.ycombinator.com/item?id=5"), Some(Link::Item(5)));
+        assert_eq!(parse("https://news.ycombinator.com/user?id=pg"), Some(Link::User("pg".into())));
+        assert_eq!(parse("rust async"), None);
     }
 
     #[test]

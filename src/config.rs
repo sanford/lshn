@@ -11,6 +11,7 @@
 //! feed = "best"           # the list to start with: top, new, best, ask, show or jobs
 //! mute = ["example.com", "crypto"]  # hide stories from these sites, or with these words
 //! big-titles = false      # titles at the text's size, even where they can be bigger
+//! user = "you"            # whose replies i shows, without logging in
 //! ```
 //!
 //! `lshn --edit-config` opens it in the editor, starting it from
@@ -33,6 +34,7 @@ pub struct Config {
     pub feed: Option<Feed>,
     pub mute: Vec<String>,
     pub big_titles: Option<bool>,
+    pub user: Option<String>,
 }
 
 /// A new config file: every setting, commented out, at its default.
@@ -69,6 +71,9 @@ pub const TEMPLATE: &str = r#"# lshn's settings. Everything is optional, and com
 
 # Draw stories' titles bigger, in terminals that can (Kitty).
 # big-titles = true
+
+# Your username on HN, for i to show the replies to you without logging in.
+# user = "you"
 "#;
 
 /// `~/.lshn`, where the config file and the user's themes go.
@@ -232,7 +237,7 @@ mod tests {
         let c = parse(&settings).unwrap();
         assert_eq!(c.theme, Some(Choice::Named("hn")));
         assert_eq!(c.big_titles, Some(true));
-        assert_eq!(settings.lines().count(), 9, "{settings}");
+        assert_eq!(settings.lines().count(), 10, "{settings}");
     }
 
     #[test]

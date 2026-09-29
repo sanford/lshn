@@ -8,10 +8,20 @@ use super::nav::Prompt;
 use super::{App, Focus};
 use crate::article::Article;
 use crate::clipboard;
-use crate::hn::{self, Comment};
+use super::act::find;
+use crate::hn;
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ratatui::style::Stylize;
+use ratatui::text::{Line, Span};
 
-/// What choosing an item copies, and what the flash calls it.
-pub(super) type Copy = (String, String);
+/// What choosing an item does.
+#[derive(Clone)]
+pub(super) enum Copy {
+    /// Copies this, and says "Copied" what.
+    Text(String, String),
+    /// Starts selecting lines to copy.
+    Select,
+}
 
 /// "1 line", "42 lines".
 fn lines(n: usize) -> String {
@@ -36,16 +46,9 @@ fn markdown_link(text: &str, url: &str) -> String {
     format!("[{text}](<{url}>)")
 }
 
-/// The comment `id`, among `comments` and their replies.
-fn find(comments: &[Comment], id: u64) -> Option<&Comment> {
-    comments
-        .iter()
-        .find_map(|c| if c.id == id { Some(c) } else { find(&c.replies, id) })
-}
-
 /// An item that copies `text`: its detail is `text` itself.
 fn copies(key: char, label: &str, text: String) -> Item<Copy> {
-    Item::new(key, label, text.clone(), (text.clone(), text))
+    Item::new(key, label, text.clone(), Copy::Text(text.clone(), text))
 }
 
 impl App {
@@ -53,6 +56,23 @@ impl App {
     pub(super) fn open_copy(&mut self) {
         let reader_shown = self.focus == Focus::Reader || self.kept();
         let items = match (reader_shown, self.user_page.clone()) {
+            (true, Some(name)) if name == super::REPLIES => {
+                let me = self.replies_for.clone().unwrap_or_default();
+                let url = hn::threads_url(&me);
+                let mut items = vec![copies('h', "On HN", url)];
+                match self.current().and_then(|d| Some((d.focused()?.id, d.focused_text()))) {
+                    Some((id, text)) => {
+                        let by = self.reply_to_you(id).map(|r| r.by.clone()).unwrap_or_default();
+                        if let Some(text) = text {
+                            let what = format!("{by}'s, {}", amount(&text));
+                            items.push(Item::new('c', "Reply", what, Copy::Text(text, format!("{by}'s reply"))));
+                        }
+                        items.push(copies('k', "Reply's link", hn::item_url(id)));
+                    }
+                    None => items.push(Item::off('c', "Reply", "none selected: j and k pick one")),
+                }
+                items
+            }
             (true, Some(name)) => {
                 let url = hn::user_url(&name);
                 vec![
@@ -65,6 +85,13 @@ impl App {
                 None => return,
             },
         };
+        let mut items = items;
+        items.push(Item::new(
+            'v',
+            "Select…",
+            "lines, from the comment you're on: j k, then c",
+            Copy::Select,
+        ));
         self.prompt = Some(Prompt::Menu(Menu::new("Copy", items)));
     }
 
@@ -106,7 +133,7 @@ impl App {
                 items.push(match text {
                     Some(text) => {
                         let what = format!("{by}'s, {}", amount(&text));
-                        Item::new('c', "Comment", what.clone(), (text, format!("{by}'s comment")))
+                        Item::new('c', "Comment", what.clone(), Copy::Text(text, format!("{by}'s comment")))
                     }
                     None => Item::off('c', "Comment", "it has no text"),
                 });
@@ -123,7 +150,7 @@ impl App {
             Some(Article::Text { md, words }) => {
                 let site = url.as_deref().and_then(hn::domain).unwrap_or_default();
                 let what = format!("from {site}, {words} words, as Markdown");
-                Item::new('a', "Article", what, (md.clone(), "the article".into()))
+                Item::new('a', "Article", what, Copy::Text(md.clone(), "the article".into()))
             }
             Some(Article::Unreadable(why)) => {
                 Item::off('a', "Article", format!("couldn't be read: {why}"))
@@ -132,6 +159,76 @@ impl App {
             None => Item::off('a', "Article", "not read yet"),
         });
         Some(items)
+    }
+
+    /// Does what a menu item says.
+    pub(super) fn choose(&mut self, choice: Copy) {
+        match choice {
+            Copy::Text(text, what) => self.put(&text, &what),
+            Copy::Select => self.start_select(),
+        }
+    }
+
+    /// Starts selecting: the comment the cursor's on, or the first line
+    /// on screen.
+    fn start_select(&mut self) {
+        let Some(doc) = self.current() else { return };
+        let Some(line) = doc.select_start() else {
+            self.flash = Some("Nothing to select".into());
+            return;
+        };
+        doc.select_lines(line, line);
+        self.prompt = Some(Prompt::Select { anchor: line, cursor: line });
+    }
+
+    /// Keys while selecting: more or less, copy, or not.
+    pub(super) fn select_key(&mut self, key: KeyEvent, anchor: usize, cursor: usize) {
+        let Some(doc) = self.current() else { return };
+        let page = doc.page().max(1) as usize;
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let to = match key.code {
+            KeyCode::Char('j') | KeyCode::Down if !shift => doc.text_line(cursor, 1),
+            KeyCode::Char('k') | KeyCode::Up if !shift => doc.text_line(cursor, -1),
+            KeyCode::Char('J') | KeyCode::Down | KeyCode::PageDown | KeyCode::Char(' ') => {
+                doc.text_line(cursor, page as isize)
+            }
+            KeyCode::Char('K') | KeyCode::Up | KeyCode::PageUp | KeyCode::Char('b') => {
+                doc.text_line(cursor, -(page as isize))
+            }
+            KeyCode::Char('g') | KeyCode::Home => doc.text_line(0, 0),
+            KeyCode::Char('G') | KeyCode::End => doc.text_line(usize::MAX, 0),
+            KeyCode::Char('c' | 'y') | KeyCode::Enter => {
+                let text = doc.selected_text();
+                doc.selection = None;
+                if let Some(text) = text {
+                    self.put(&text, &amount(&text));
+                }
+                return;
+            }
+            KeyCode::Esc | KeyCode::Char('q') => {
+                doc.selection = None;
+                return;
+            }
+            _ => cursor,
+        };
+        doc.select_lines(anchor, to);
+        self.prompt = Some(Prompt::Select { anchor, cursor: to });
+    }
+
+    /// The footer while selecting.
+    pub(super) fn select_footer(&mut self) -> Line<'static> {
+        let n = self
+            .current()
+            .and_then(|d| d.selected_text())
+            .map_or(String::new(), |t| amount(&t));
+        Line::from(vec![
+            " Select: ".bold(),
+            Span::raw("↑↓ j k").bold(),
+            Span::raw(" more or less  "),
+            Span::raw("c ⏎").bold(),
+            Span::raw(format!(" copy {n}  ")),
+            "esc cancel".dim(),
+        ])
     }
 
     /// Copies `text`, and says so: "Copied `what`".

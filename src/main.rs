@@ -42,8 +42,9 @@ use theme::{Choice, Mode, Theme};
 #[command(version)]
 struct Args {
     /// The list to start with (top, new, best, ask, show or jobs), or a
-    /// story's id to print it
-    #[arg(value_name = "LIST|ID")]
+    /// story or comment to open: its id, or its link on HN (someone's page
+    /// too). With output that isn't a terminal, a story is printed
+    #[arg(value_name = "LIST|ID|LINK")]
     what: Option<String>,
 
     /// Wrap text at N columns instead of the terminal's width
@@ -119,18 +120,16 @@ fn run(args: Args) -> io::Result<()> {
     }
     // Flags win over the config file.
     let config = config::load();
-    let (feed, id) = match args.what.as_deref() {
+    let (feed, open) = match args.what.as_deref() {
         None => (None, None),
-        Some(what) => match what.parse::<u64>() {
-            Ok(id) => (None, Some(id)),
-            Err(_) => (
-                Some(Feed::from_str(what, true).map_err(|_| {
-                    io::Error::other(format!(
-                        "{what}: not a list (top, new, best, ask, show, jobs) or a story's id"
-                    ))
-                })?),
-                None,
-            ),
+        Some(what) => match (Feed::from_str(what, true), hn::parse(what)) {
+            (Ok(feed), _) => (Some(feed), None),
+            (_, Some(link)) => (None, Some(link)),
+            _ => {
+                return Err(io::Error::other(format!(
+                    "{what}: not a list (top, new, best, ask, show, jobs), an id or an HN link"
+                )));
+            }
         },
     };
     let feed = feed.or(config.feed).unwrap_or(Feed::Top);
@@ -152,13 +151,14 @@ fn run(args: Args) -> io::Result<()> {
         None => Theme::chosen(choice, color),
     };
     let width = args.width.or(config.width).filter(|&w| w > 0);
-    if let Some(id) = id {
-        if interactive {
-            return Err(io::Error::other(
-                "opening a story by id is for printing, for now: lshn ID | less -R",
-            ));
+    match &open {
+        Some(hn::Link::Item(id)) if !interactive => {
+            return print_story(*id, &theme, width.unwrap_or_else(terminal_width));
         }
-        return print_story(id, &theme, width.unwrap_or_else(terminal_width));
+        Some(hn::Link::User(_)) if !interactive => {
+            return Err(io::Error::other("someone's page is only for reading here, in a terminal"));
+        }
+        _ => {}
     }
     if !interactive {
         return list(feed);
@@ -174,6 +174,8 @@ fn run(args: Args) -> io::Result<()> {
         omarchy: palette.is_some(),
         feed,
         mute: config.mute,
+        open,
+        user: config.user.filter(|u| hn::is_username(u)),
     };
     tui::run(theme, settings)
 }
@@ -197,7 +199,10 @@ fn edit_config() -> io::Result<()> {
 /// Prints a feed's first 30 stories, one per line: points, comments,
 /// title and link, separated by tabs.
 fn list(feed: Feed) -> io::Result<()> {
-    let ids = hn::feed(feed).map_err(io::Error::other)?;
+    let ids = match feed {
+        Feed::Saved => store::Marked::load(store::dir().as_deref(), "saved", None, 0).newest_first(),
+        _ => hn::feed(feed).map_err(io::Error::other)?,
+    };
     let ids: Vec<u64> = ids.into_iter().take(30).collect();
     // All at once, then in order.
     let stories: Vec<_> = std::thread::scope(|s| {
@@ -219,9 +224,15 @@ fn list(feed: Feed) -> io::Result<()> {
     out.flush()
 }
 
-/// Prints a story, its article and its comments, rendered.
+/// Prints a story, its article and its comments, rendered: for a
+/// comment, the story it's on.
 fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
-    let story = hn::story(id).map_err(io::Error::other)?;
+    let mut story = hn::story(id).map_err(io::Error::other)?;
+    if story.title.is_empty() && story.parent.is_some() {
+        let id = hn::story_of(id).map_err(io::Error::other)?;
+        story = hn::story(id).map_err(io::Error::other)?;
+    }
+    let id = story.id;
     let (article, thread) = std::thread::scope(|s| {
         let article = story.url.as_deref().map(|url| s.spawn(|| article::fetch(url)));
         let thread = hn::thread(id, &story.kids);

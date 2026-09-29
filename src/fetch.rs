@@ -11,7 +11,7 @@
 
 use crate::article::{self, Article};
 use crate::auth::{self, Form, Session};
-use crate::hn::{self, Comment, Feed, Story, User};
+use crate::hn::{self, Comment, Feed, Replies, Story, User};
 use crate::figure;
 use crate::store::Cache;
 use image::DynamicImage;
@@ -34,6 +34,8 @@ pub enum Job {
     /// Stories matching a search.
     Search(String),
     Story(u64),
+    /// The story a comment is on.
+    StoryOf(u64),
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
     Article(u64, String),
@@ -41,6 +43,8 @@ pub enum Job {
     Figure(u64, usize, String),
     /// Someone's profile and latest posts.
     User(String),
+    /// The replies to someone's latest posts.
+    Replies(String),
     /// Logging in: a username and password.
     Login(String, String),
     Upvote(Session, u64),
@@ -54,10 +58,13 @@ pub enum Got {
     Feed(Feed, Result<Vec<u64>, String>),
     Search(String, Result<Vec<u64>, String>),
     Story(u64, Result<Story, String>),
+    /// The story comment `.0` is on.
+    StoryOf(u64, Result<u64, String>),
     Thread(u64, Result<Vec<Comment>, String>),
     Article(u64, Article),
     Figure(u64, usize, Result<DynamicImage, String>),
     User(String, Result<User, String>),
+    Replies(String, Result<Replies, String>),
     LoggedIn(Result<Session, String>),
     Upvoted(Result<(), String>),
     ReplyForm(u64, Result<Form, String>),
@@ -237,6 +244,7 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             let found = hn::search(&query);
             send(Got::Search(query, found), true)
         }
+        Job::StoryOf(id) => send(Got::StoryOf(id, hn::story_of(id)), true),
         Job::Story(id) => {
             if let Some(story) = cache.get("story", &id.to_string()) {
                 send(Got::Story(id, Ok(story)), false)?;
@@ -274,6 +282,16 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                 cache.put("user", &name, user);
             }
             send(Got::User(name, fresh), true)
+        }
+        Job::Replies(name) => {
+            if let Some(replies) = cache.get("replies", &name) {
+                send(Got::Replies(name.clone(), Ok(replies)), false)?;
+            }
+            let fresh = hn::replies(&name);
+            if let Ok(replies) = &fresh {
+                cache.put("replies", &name, replies);
+            }
+            send(Got::Replies(name, fresh), true)
         }
         Job::Figure(id, index, url) => {
             let key = format!("{id}-{index}");

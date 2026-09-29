@@ -79,6 +79,9 @@ impl App {
     /// the story. `None` on someone's page, where there's no telling.
     pub(super) fn acting_on(&mut self) -> Option<u64> {
         let reader = self.focus == Focus::Reader || self.kept();
+        if reader && self.user_page.as_deref() == Some(super::REPLIES) {
+            return Some(self.current()?.focused()?.id);
+        }
         if reader && self.user_page.is_some() {
             return None;
         }
@@ -116,7 +119,7 @@ impl App {
     }
 
     /// Looks for a saved login, the first time it's needed.
-    fn find_login(&mut self) {
+    pub(super) fn find_login(&mut self) {
         if !matches!(self.auth, Auth::Unknown) {
             return;
         }
@@ -169,7 +172,11 @@ impl App {
     }
 
     /// The story being read or previewed.
-    fn story_on_screen(&self) -> Option<u64> {
+    fn story_on_screen(&mut self) -> Option<u64> {
+        if self.user_page.as_deref() == Some(super::REPLIES) {
+            let id = self.current()?.focused()?.id;
+            return self.reply_to_you(id)?.story_id;
+        }
         self.current_key().map(|(id, _)| id)
     }
 
@@ -221,6 +228,7 @@ impl App {
             Prompt::Logout { user } => {
                 if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
                     session::forget(store::dir().as_deref());
+                    store::set_user(store::dir().as_deref(), None);
                     self.auth = Auth::Out;
                     self.flash = Some(format!("Logged out {user}"));
                 }
@@ -292,6 +300,8 @@ impl App {
                 return;
             }
         };
+        // Who you are, for the replies to you: not a secret.
+        store::set_user(store::dir().as_deref(), Some(s.user()));
         match session::save_keyring(&s.cookie) {
             Ok(()) => {
                 self.flash = Some(format!("Logged in as {}", s.user()));
@@ -347,6 +357,9 @@ impl App {
     pub(super) fn said(&self, id: u64) -> (String, String) {
         if let Some(s) = self.stories.get(&id) {
             return (s.by.clone(), s.title.clone());
+        }
+        if let Some(r) = self.reply_to_you(id) {
+            return (r.by.clone(), story::html_to_text(&r.text));
         }
         self.threads
             .values()
@@ -493,7 +506,7 @@ fn edit(text: &mut String, key: KeyEvent, ctrl: bool) {
 }
 
 /// Comment `id`, among these and their replies.
-fn find(comments: &[hn::Comment], id: u64) -> Option<&hn::Comment> {
+pub(super) fn find(comments: &[hn::Comment], id: u64) -> Option<&hn::Comment> {
     comments
         .iter()
         .find_map(|c| if c.id == id { Some(c) } else { find(&c.replies, id) })
