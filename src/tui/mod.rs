@@ -59,6 +59,8 @@ pub struct Settings {
     pub scroll: usize,
     /// Show articles' first pictures.
     pub images: bool,
+    /// Draw stories' titles big, where the terminal can.
+    pub big_titles: bool,
     /// The theme asked for, by flag or config.
     pub choice: Choice,
     /// Colors come from Omarchy's theme, and follow it.
@@ -101,6 +103,12 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
             crate::figure::set_cell(cell.width, cell.height);
         }
     }
+    if settings.big_titles && crate::sizing::detect() {
+        crate::sizing::enable();
+    }
+    // A terminal may print some of the questions it doesn't know: draw the
+    // whole screen afresh over them.
+    terminal.clear()?;
     set_mouse(app.mouse_on, true);
     if app.mouse_on {
         // ratatui's panic hook restores the terminal, but doesn't know
@@ -123,6 +131,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
 /// lost. tmux passes on neither the question nor pictures, unless set up
 /// to, so there it's half blocks without asking.
 fn picker() -> Option<Picker> {
+    use ratatui_image::picker::ProtocolType;
     use ratatui_image::picker::cap_parser::QueryStdioOptions;
     if std::env::var_os("TMUX").is_some() {
         return Some(Picker::halfblocks());
@@ -132,13 +141,50 @@ fn picker() -> Option<Picker> {
         ..QueryStdioOptions::default()
     })
     .ok()?;
-    // iTerm2 says it can do Sixel too, and that's what gets picked, but
-    // its own pictures are what it draws best.
-    let iterm = |var| std::env::var(var).is_ok_and(|v| v.contains("iTerm"));
-    if iterm("TERM_PROGRAM") || iterm("LC_TERMINAL") {
-        picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+    // Which terminal this is. iTerm2's variables outlive it: a terminal
+    // started from iTerm2 (Terminal.app, say) inherits its LC_TERMINAL, so
+    // that only counts when nothing else says (over ssh, say).
+    let program = std::env::var("TERM_PROGRAM").ok();
+    let iterm = match &program {
+        Some(p) => p.contains("iTerm"),
+        None => std::env::var("LC_TERMINAL").is_ok_and(|v| v.contains("iTerm")),
+    };
+    if iterm {
+        // iTerm2 says it can do Sixel too, and that's what gets picked, but
+        // its own pictures are what it draws best.
+        picker.set_protocol_type(ProtocolType::Iterm2);
+    } else if picker.protocol_type() == ProtocolType::Iterm2
+        && program.is_some_and(|p| !ITERM_LIKE.iter().any(|t| p.contains(t)))
+    {
+        // Guessed from iTerm2's leftover variables, in a terminal that says
+        // it's something else.
+        return None;
     }
     Some(picker)
+}
+
+/// Terminals that draw iTerm2's pictures, by what they call themselves in
+/// `TERM_PROGRAM`: those ratatui-image counts.
+const ITERM_LIKE: &[&str] = &[
+    "iTerm",
+    "WezTerm",
+    "mintty",
+    "vscode",
+    "Tabby",
+    "Hyper",
+    "rio",
+    "Bobcat",
+    "WarpTerminal",
+];
+
+/// Stops lshn, as Ctrl-Z does outside raw mode, till the shell continues it
+/// with `fg`.
+fn stop() {
+    #[cfg(unix)]
+    // SAFETY: raise only sends a signal to this process.
+    unsafe {
+        libc::raise(libc::SIGTSTP);
+    }
 }
 
 /// Turns mouse reporting on or off, if lshn uses the mouse.
@@ -298,6 +344,12 @@ struct App {
     flash: Option<String>,
     /// The mouse is in use.
     mouse_on: bool,
+    /// Ctrl-Z was pressed: stop, once the key's handled.
+    suspend: bool,
+    /// Where big titles were drawn last frame.
+    big_drawn: Vec<Rect>,
+    /// Draw the screen again from scratch.
+    redraw: bool,
 }
 
 impl App {
@@ -369,6 +421,9 @@ impl App {
             last_search: String::new(),
             flash: None,
             mouse_on: false,
+            suspend: false,
+            big_drawn: Vec::new(),
+            redraw: false,
         }
     }
 
@@ -381,12 +436,7 @@ impl App {
             self.restyle();
             self.preview_theme();
             self.prefetch();
-            // All at once: without it, a terminal can show a frame half
-            // drawn, which shows most while pictures scroll.
-            use ratatui::crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
-            ratatui::crossterm::queue!(io::stdout(), BeginSynchronizedUpdate)?;
-            terminal.draw(|f| self.draw(f))?;
-            ratatui::crossterm::execute!(io::stdout(), EndSynchronizedUpdate)?;
+            self.frame(terminal)?;
             // While fetching, wake up often to show what's come; otherwise
             // now and then, to keep the ages current.
             let wait = if self.waiting.any() || self.figure_moving {
@@ -410,11 +460,48 @@ impl App {
                     }
                     _ => {} // Resizes redraw at the top of the loop.
                 }
-                if self.editing.is_some() || !event::poll(Duration::ZERO)? {
+                if self.editing.is_some() || self.suspend || !event::poll(Duration::ZERO)? {
                     break;
                 }
             }
+            if std::mem::take(&mut self.suspend) {
+                self.hand_over(terminal, stop)?;
+            }
         }
+    }
+
+    /// Draws the screen, all at once: without that, a terminal can show a
+    /// frame half drawn, which shows most while pictures scroll. When big
+    /// titles have moved, draws it again from scratch, since the terminal
+    /// clears the whole of one when any of it is written over.
+    fn frame(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        use ratatui::crossterm::terminal::{
+            BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate,
+        };
+        use ratatui::crossterm::{execute, queue};
+        queue!(io::stdout(), BeginSynchronizedUpdate)?;
+        terminal.draw(|f| self.draw(f))?;
+        if std::mem::take(&mut self.redraw) {
+            // Not terminal.clear(), which asks the terminal where the cursor
+            // is: a wait for its answer, every time, over ssh. Swapping
+            // leaves both buffers blank, so everything's drawn.
+            queue!(io::stdout(), Clear(ClearType::All))?;
+            terminal.swap_buffers();
+            terminal.draw(|f| self.draw(f))?;
+        }
+        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        Ok(())
+    }
+
+    /// Gives the terminal back as it was while `f` runs, then takes it again.
+    fn hand_over<T>(&self, terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
+        set_mouse(self.mouse_on, false);
+        ratatui::restore();
+        let result = f();
+        *terminal = ratatui::init();
+        set_mouse(self.mouse_on, true);
+        terminal.clear()?;
+        Ok(result)
     }
 
     /// Hands the fetcher a job, counting it until it's done.
@@ -1044,6 +1131,10 @@ impl App {
         if ctrl && key.code == KeyCode::Char('c') {
             return true;
         }
+        if ctrl && key.code == KeyCode::Char('z') && cfg!(unix) {
+            self.suspend = true;
+            return false;
+        }
         self.flash = None;
         if self.help {
             self.help = false;
@@ -1278,6 +1369,13 @@ impl App {
             draw_help(f);
         }
         self.theme.paint(f.buffer_mut());
+        // Last, so it's drawn with the colors on screen, over what's still
+        // there to see.
+        let big = crate::sizing::apply(f.buffer_mut());
+        if big != self.big_drawn {
+            self.big_drawn = big;
+            self.redraw = true;
+        }
     }
 
     fn draw_header(&mut self, f: &mut Frame, area: Rect) {
@@ -1832,6 +1930,7 @@ fn draw_help(f: &mut Frame) {
         ("/", "Filter the list by title (fuzzy)"),
         ("\\", "Show or hide the list while reading"),
         ("Q", "Quit from anywhere"),
+        ("^z", "Suspend: fg in the shell comes back"),
     ];
     let key_width = KEYS.iter().map(|(k, _)| wrap::width(k)).max().unwrap_or(0);
     let rows: Vec<Line> = KEYS

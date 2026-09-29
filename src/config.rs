@@ -10,7 +10,11 @@
 //! images = false          # don't show articles' first pictures
 //! feed = "best"           # the list to start with: top, new, best, ask, show or jobs
 //! mute = ["example.com", "crypto"]  # hide stories from these sites, or with these words
+//! big-titles = false      # titles at the text's size, even where they can be bigger
 //! ```
+//!
+//! `lshn --edit-config` opens it in the editor, starting it from
+//! [`TEMPLATE`] if there isn't one.
 
 use crate::hn::Feed;
 use crate::theme::Choice;
@@ -28,11 +32,64 @@ pub struct Config {
     pub images: Option<bool>,
     pub feed: Option<Feed>,
     pub mute: Vec<String>,
+    pub big_titles: Option<bool>,
+}
+
+/// A new config file: every setting, commented out, at its default.
+pub const TEMPLATE: &str = r#"# lshn's settings. Everything is optional, and command-line flags win.
+# Take the # off a line to change it.
+
+# auto, dark, light, or a theme's name, like "tokyo-night" (t shows them all).
+# Themes of your own go in ~/.lshn/themes/, as NAME.toml in Omarchy's
+# colors.toml format.
+# theme = "hn"
+
+# Wrap text at this many columns (0: the terminal's width).
+# width = 0
+
+# Scroll and click with the mouse. Off, the terminal's own text selection
+# works without holding a modifier key.
+# mouse = true
+
+# Show the outline beside stories.
+# outline = false
+
+# Lines j and k scroll.
+# scroll = 2
+
+# Show articles' pictures, where the terminal can.
+# images = true
+
+# The list to start with: top, new, best, ask, show or jobs.
+# feed = "top"
+
+# Hide stories from these sites (and their subdomains), or with these words
+# in their titles.
+# mute = ["example.com", "crypto"]
+
+# Draw stories' titles bigger, in terminals that can (Kitty).
+# big-titles = true
+"#;
+
+/// `~/.lshn`, where the config file and the user's themes go.
+pub fn dir() -> Option<PathBuf> {
+    crate::store::dir()
+}
+
+/// The config file `--config` named, if it did.
+static CHOSEN: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Uses `path` instead of `~/.lshn/config.toml`, for reading, saving the
+/// theme and editing.
+pub fn choose(path: PathBuf) {
+    let _ = CHOSEN.set(path);
 }
 
 pub fn path() -> Option<PathBuf> {
-    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
-    Some(PathBuf::from(home).join(".lshn").join("config.toml"))
+    if let Some(path) = CHOSEN.get() {
+        return Some(path.clone());
+    }
+    Some(dir()?.join("config.toml"))
 }
 
 /// Reads the config file. A missing file is fine; a broken one is reported
@@ -161,6 +218,21 @@ mod tests {
         assert_eq!(c.outline, Some(true));
         assert_eq!(c.feed, Some(Feed::Best));
         assert_eq!(c.mute, ["x.com"]);
+    }
+
+    #[test]
+    fn the_template_is_all_comments_and_every_line_parses() {
+        assert!(parse(TEMPLATE).unwrap().theme.is_none());
+        let settings: String = TEMPLATE
+            .lines()
+            .filter_map(|l| l.strip_prefix("# "))
+            .filter(|l| l.contains(" = "))
+            .map(|l| format!("{l}\n"))
+            .collect();
+        let c = parse(&settings).unwrap();
+        assert_eq!(c.theme, Some(Choice::Named("hn")));
+        assert_eq!(c.big_titles, Some(true));
+        assert_eq!(settings.lines().count(), 9, "{settings}");
     }
 
     #[test]

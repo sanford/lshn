@@ -91,6 +91,7 @@ Anywhere:
 | `t` | Pick a color theme |
 | `?` | All of the above |
 | `Q` `Ctrl-C` | Quit, from anywhere |
+| `Ctrl-Z` | Suspend, as in the shell: `fg` comes back |
 
 `Home` `End` `PgUp` `PgDn` do what they say. Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
@@ -120,6 +121,8 @@ Comments follow HN's convention for quoting: a paragraph starting with `>` is sh
 
 An article's pictures are shown with it: the first at the top, the rest after the paragraphs they're in (the preview shows only the first). Terminals that can draw pictures (iTerm2, Kitty, WezTerm, Ghostty, and those with Sixel) show the picture itself; others, and tmux, get a rougher version drawn in colored half blocks. `images = false` turns them off.
 
+In terminals that can draw text bigger (Kitty), each story's title is drawn at twice the size. `big-titles = false` turns that off.
+
 Everything a story or comment says is treated as text: none of it can become formatting, or reach the terminal as a control sequence.
 
 ### Settings
@@ -136,4 +139,11 @@ scroll = 1              # lines j and k scroll (default 2)
 images = false          # don't show articles' pictures
 mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
                                   # or with these words or phrases in their titles
+big-titles = false      # titles at the text's size, even in Kitty
 ```
+
+`lshn --edit-config` opens it in your editor, starting one with every setting listed, and says if what you saved can't be read. `--config FILE` reads another file instead.
+
+Themes of your own go in `~/.lshn/themes/`, as `NAME.toml` or `NAME/colors.toml` in [Omarchy's](https://omarchy.org) `colors.toml` format, and are listed with the others.
+
+`lshn --completions zsh` (or bash, fish, elvish, powershell) prints a script that completes lshn's options, and `lshn --man` its man page.

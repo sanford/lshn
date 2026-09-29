@@ -16,16 +16,17 @@ mod palettes;
 mod render;
 mod safe;
 mod session;
+mod sizing;
 mod store;
 mod story;
 mod theme;
 mod tui;
 mod wrap;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser, ValueEnum};
 use hn::Feed;
 use std::io::{self, ErrorKind, IsTerminal, Write};
-use clap::ValueEnum;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use theme::{Choice, Mode, Theme};
 
@@ -35,7 +36,8 @@ use theme::{Choice, Mode, Theme};
 /// comments. When output isn't a terminal, prints the list.
 ///
 /// Defaults for the options can go in ~/.lshn/config.toml, e.g. `theme =
-/// "dark"`, `width = 100`, `feed = "best"`, `mouse = false`.
+/// "dark"`, `width = 100`, `feed = "best"`, `mouse = false`: `lshn
+/// --edit-config` opens it with every setting listed.
 #[derive(Parser)]
 #[command(version)]
 struct Args {
@@ -60,6 +62,23 @@ struct Args {
     /// tokyo-night, which colors everything
     #[arg(long)]
     theme: Option<Choice>,
+
+    /// Read settings from FILE instead of ~/.lshn/config.toml
+    #[arg(long, value_name = "FILE")]
+    config: Option<PathBuf>,
+
+    /// Open the config file in $VISUAL or $EDITOR, starting one with every
+    /// setting in it if there isn't one
+    #[arg(long, conflicts_with_all = ["what", "completions", "man"])]
+    edit_config: bool,
+
+    /// Print the script that completes lshn's options in SHELL
+    #[arg(long, value_name = "SHELL", exclusive = true)]
+    completions: Option<clap_complete::Shell>,
+
+    /// Print the man page
+    #[arg(long, hide = true, exclusive = true)]
+    man: bool,
 }
 
 fn main() -> ExitCode {
@@ -75,6 +94,29 @@ fn main() -> ExitCode {
 }
 
 fn run(args: Args) -> io::Result<()> {
+    if let Some(path) = args.config {
+        // Named on purpose, so unlike the usual one, it has to be there.
+        if !args.edit_config && !path.is_file() {
+            return Err(io::Error::new(
+                ErrorKind::NotFound,
+                format!("{}: no such config file", path.display()),
+            ));
+        }
+        config::choose(path);
+    }
+    if args.edit_config {
+        return edit_config();
+    }
+    if let Some(shell) = args.completions {
+        clap_complete::generate(shell, &mut Args::command(), "lshn", &mut io::stdout());
+        return Ok(());
+    }
+    if args.man {
+        return clap_mangen::Man::new(Args::command()).render(&mut io::stdout());
+    }
+    for e in palettes::errors() {
+        eprintln!("lshn: ignoring theme {e}");
+    }
     // Flags win over the config file.
     let config = config::load();
     let (feed, id) = match args.what.as_deref() {
@@ -127,12 +169,29 @@ fn run(args: Args) -> io::Result<()> {
         outline: config.outline.unwrap_or(false),
         scroll: config.scroll.unwrap_or(2).max(1),
         images: config.images.unwrap_or(true),
+        big_titles: config.big_titles.unwrap_or(true),
         choice,
         omarchy: palette.is_some(),
         feed,
         mute: config.mute,
     };
     tui::run(theme, settings)
+}
+
+/// Opens the config file in the editor, writing the template first if
+/// there's no file, then says whether lshn can read what was saved.
+fn edit_config() -> io::Result<()> {
+    let path = config::path().ok_or_else(|| io::Error::other("no home directory"))?;
+    if !path.exists() {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, config::TEMPLATE)?;
+    }
+    editor::edit(&path, 1)?;
+    // load() says what's wrong, if anything.
+    config::load();
+    Ok(())
 }
 
 /// Prints a feed's first 30 stories, one per line: points, comments,

@@ -11,6 +11,9 @@ categories = ["command-line-utilities"]
 [dependencies]
 crossterm = "0.29.0"
 clap = { version = "4.6.7", features = ["derive"] }
+# --completions and --man.
+clap_complete = "4.6.11"
+clap_mangen = "0.3.3"
 comrak = { version = "0.55.0", default-features = false }
 nucleo-matcher = "0.3.1"
 ratatui = "0.30.2"
@@ -35,6 +38,10 @@ getrandom = "0.4.3"
 ratatui-image = { version = "11.1.0", default-features = false, features = ["crossterm"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 base64 = "0.22"
+
+[target."cfg(unix)".dependencies]
+# Ctrl-Z: stopping lshn the way the shell would.
+libc = "0.2.189"
 
 [dev-dependencies]
 insta = "1.48.0"

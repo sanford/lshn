@@ -4,7 +4,7 @@
 //! what was being done carries on once it's there.
 
 use super::nav::{Prompt, Purpose};
-use super::{App, Asked, Focus, set_mouse};
+use super::{App, Asked, Focus};
 use crate::auth::{self, Form, Session};
 use crate::fetch::Job;
 use crate::session::{self, Saved};
@@ -386,12 +386,7 @@ impl App {
         }
         std::fs::write(&draft.path, text)?;
         // Hand the terminal to the editor until it's done.
-        set_mouse(self.mouse_on, false);
-        ratatui::restore();
-        let result = editor::edit(&draft.path, 1);
-        *terminal = ratatui::init();
-        set_mouse(self.mouse_on, true);
-        terminal.clear()?;
+        let result = self.hand_over(terminal, || editor::edit(&draft.path, 1))?;
         if let Err(e) = result {
             self.flash = Some(format!("Couldn't edit: {e}"));
             return Ok(());

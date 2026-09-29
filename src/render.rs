@@ -31,6 +31,9 @@ pub struct Rendered {
     pub figures: Vec<Figure>,
     /// Where each comment starts, in order.
     pub comments: Vec<CommentMark>,
+    /// Lines of titles to draw at twice the size, over the blank line
+    /// below each (see `sizing`).
+    pub big: Vec<usize>,
 }
 
 /// Where a comment starts: its id, how deeply it's nested, and its first
@@ -111,6 +114,18 @@ pub fn render(
     base: Option<&Path>,
     site: Option<&Path>,
 ) -> Rendered {
+    render_with(md, width, theme, base, site, crate::sizing::enabled())
+}
+
+/// [`render`], with a big title or not.
+fn render_with(
+    md: &str,
+    width: usize,
+    theme: &Theme,
+    base: Option<&Path>,
+    site: Option<&Path>,
+    big: bool,
+) -> Rendered {
     let arena = Arena::new();
     let root = parse_document(&arena, md, &options());
     let mut r = Renderer {
@@ -132,6 +147,8 @@ pub fn render(
         figures: Vec::new(),
         pending_comment: None,
         comments: Vec::new(),
+        big_titles: big,
+        big: Vec::new(),
     };
     for child in root.children() {
         let pos = child.data().sourcepos;
@@ -144,6 +161,7 @@ pub fn render(
         links: r.links.into_inner(),
         figures: r.figures,
         comments: r.comments,
+        big: r.big,
     }
 }
 
@@ -157,6 +175,11 @@ struct Prefix {
 
 struct Renderer<'t> {
     theme: &'t Theme,
+    /// Lay out the title, the one top-level heading, to be drawn twice the
+    /// size.
+    big_titles: bool,
+    /// Lines of big titles: see [`Rendered::big`].
+    big: Vec<usize>,
     width: usize,
     out: Vec<RLine>,
     prefix: Vec<Prefix>,
@@ -361,7 +384,14 @@ impl Renderer<'_> {
         // No "###" in front: in a story, the third level is each comment's
         // author, which reads better plain.
         let pieces = self.inlines(node, style);
-        let lines = wrap::wrap_links(&pieces, self.avail());
+        // Where the terminal can draw it twice the size.
+        let big = level == 1 && self.prefix.is_empty() && self.big_titles;
+        let avail = if big {
+            (self.avail() / 2).max(1)
+        } else {
+            self.avail()
+        };
+        let lines = wrap::wrap_links(&pieces, avail);
         let w = lines
             .iter()
             .map(|l| wrap::spans_width(&l.spans))
@@ -376,10 +406,17 @@ impl Renderer<'_> {
             text,
         });
         for line in lines {
+            if big {
+                self.big.push(self.out.len());
+            }
             self.emit_wrapped(line);
+            if big {
+                self.emit(Vec::new());
+            }
         }
         if level <= 2 {
             let rule = if level == 1 { "═" } else { "─" };
+            let w = if big { w * 2 } else { w };
             self.emit(vec![Span::styled(rule.repeat(w), style)]);
         }
         self.gap();
@@ -957,6 +994,22 @@ mod tests {
             .iter()
             .map(|l| l.text() + "\n")
             .collect()
+    }
+
+    #[test]
+    fn lays_out_big_titles() {
+        let md = "# Big title here\n\ntext\n\n## Section\n\n> # Quoted\n";
+        let r = render_with(md, 20, &Theme::plain(), None, None, true);
+        let text: Vec<_> = r.lines.iter().map(RLine::text).collect();
+        // Wrapped at half the width, a line left under each for its bottom
+        // half, and the rule as wide as it'll be drawn.
+        assert_eq!(
+            text[..6],
+            ["Big title", "", "here", "", "══════════════════", ""]
+        );
+        assert_eq!(r.big, [0, 2]);
+        assert!(text.contains(&"Section".to_string()), "{text:?}");
+        assert!(text.contains(&"│ Quoted".to_string()), "{text:?}");
     }
 
     #[test]

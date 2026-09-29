@@ -55,6 +55,8 @@ pub struct Doc {
     figures: Vec<Figure>,
     /// Each comment's own lines, not its replies'.
     comments: Vec<CommentSpan>,
+    /// Lines of the title, to draw twice the size (see `sizing`).
+    big: Vec<usize>,
     /// The comment the cursor's on, by id, so it stays put when the thread
     /// changes; `None` in the article above.
     cursor: Option<u64>,
@@ -99,6 +101,7 @@ impl Doc {
             headings: Vec::new(),
             links: Vec::new(),
             figures: Vec::new(),
+            big: Vec::new(),
             comments: Vec::new(),
             cursor: None,
             cursor_row: None,
@@ -184,6 +187,7 @@ impl Doc {
         self.headings = rendered.headings;
         self.links = rendered.links;
         self.figures = rendered.figures;
+        self.big = rendered.big;
         self.comments = comment_spans(&rendered.comments, &self.lines);
         self.width = width;
         if let Some(query) = self.search.as_ref().map(|s| s.query.clone()) {
@@ -271,6 +275,17 @@ impl Doc {
             .collect();
         f.render_widget(Paragraph::new(visible), area);
         self.draw_scrollbar(f, area);
+        // Before the link hints, which a big title would hide.
+        for &line in &self.big {
+            let Some(row) = line.checked_sub(self.top) else {
+                continue;
+            };
+            if row + 1 < self.height && line + 1 < self.lines.len() {
+                let cols = wrap::spans_width(&self.lines[line].spans);
+                let y = area.y + row as u16;
+                crate::sizing::place(f.buffer_mut(), area.x, y, cols as u16);
+            }
+        }
 
         let style = Style::new().black().on_yellow().bold();
         for hint in &self.hints {
