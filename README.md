@@ -6,6 +6,31 @@
 
 ![lshn: the front page on the left, and the selected story's article on the right](docs/screenshot.png)
 
+## Install
+
+With [Homebrew](https://brew.sh), on macOS and Linux:
+
+```sh
+brew install sanford/tap/lshn
+```
+
+With Cargo, if you have a [Rust toolchain](https://rustup.rs), on macOS, Linux or Windows:
+
+```sh
+cargo install --git https://github.com/sanford/lshn
+```
+
+Or build from source:
+
+```sh
+git clone https://github.com/sanford/lshn
+cd lshn
+cargo build --release
+./target/release/lshn
+```
+
+While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1 [ARGS]` on Windows) builds, installs to `~/.local/bin`, and runs in one step.
+
 ## Usage
 
 ```sh
@@ -112,12 +137,3 @@ images = false          # don't show articles' pictures
 mute = ["example.com", "crypto"]  # hide stories from these sites (and their subdomains),
                                   # or with these words or phrases in their titles
 ```
-
-## Building
-
-```sh
-cargo build --release
-./target/release/lshn
-```
-
-While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1` on Windows) builds, installs to `~/.local/bin`, and runs in one step.
