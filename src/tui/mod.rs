@@ -1778,11 +1778,12 @@ impl App {
         }
     }
 
-    /// The selected story: its title in the light orange of what's
-    /// highlighted, even once it's been read. Reversed, with no colors.
+    /// The selected story: its title in the theme's accent (HN's orange),
+    /// even once it's been read. Reversed, with no colors.
     fn list_highlight(&self) -> Style {
         let style = if self.theme.color {
-            Style::new().fg(Color::Yellow)
+            // Without a palette, the headings' color.
+            Style::new().fg(self.theme.frame.unwrap_or(Color::Magenta))
         } else {
             Style::new().add_modifier(Modifier::REVERSED)
         };
