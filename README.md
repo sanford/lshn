@@ -14,10 +14,10 @@ With [Homebrew](https://brew.sh), on macOS and Linux:
 brew install sanford/tap/lshn
 ```
 
-With Cargo, if you have a [Rust toolchain](https://rustup.rs), on macOS, Linux or Windows:
+With Cargo, if you have a [Rust toolchain](https://rustup.rs), from [crates.io](https://crates.io/crates/lshn):
 
 ```sh
-cargo install --git https://github.com/sanford/lshn
+cargo install lshn
 ```
 
 Or build from source:

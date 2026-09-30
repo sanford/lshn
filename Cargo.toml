@@ -1,12 +1,15 @@
 [package]
 name = "lshn"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "A terminal Hacker News reader built for speed: stories, articles and comments on one screen"
 repository = "https://github.com/sanford/lshn"
 license = "GPL-3.0-or-later"
+readme = "README.md"
 keywords = ["hacker-news", "reader", "terminal", "tui"]
 categories = ["command-line-utilities"]
+# What building needs, not the README's screenshots or the dev scripts.
+exclude = ["docs/", ".github/", ".cargo/", "run.sh", "run.ps1"]
 
 [dependencies]
 crossterm = "0.29.0"

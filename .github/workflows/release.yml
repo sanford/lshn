@@ -1,0 +1,44 @@
+name: Release
+
+# Checks each release builds and passes its tests on Linux, x86_64 and
+# arm64, as static (musl) binaries, on GitHub's runners: nothing else in the
+# release does. Nothing is published. Run by hand with a tag to check one
+# before it's released, or again after.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to check, like v0.3.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+        with:
+          ref: ${{ env.TAG }}
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: rustup target add ${{ matrix.target }}
+      - run: cargo test --locked --release --target ${{ matrix.target }}
+      - run: cargo build --locked --release --target ${{ matrix.target }}
+      # Static, and the version it says it is.
+      - run: |
+          bin=target/${{ matrix.target }}/release/lshn
+          file "$bin"
+          file "$bin" | grep -qE 'statically linked|static-pie linked'
+          "$bin" --version | grep -qx "lshn ${TAG#v}"
