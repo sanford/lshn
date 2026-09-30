@@ -2186,61 +2186,103 @@ fn char_width(c: char) -> usize {
 }
 
 fn draw_help(f: &mut Frame) {
-    const KEYS: &[(&str, &str)] = &[
-        ("↑↓ j k", "Move / scroll; in the comments, comment by comment"),
-        ("⏎ → l", "Read the selected story full screen"),
-        ("⏎", "Reading: beside the list, full screen; full screen, back to the list"),
-        ("tab", "Between the list and the story (both stay, if there's room)"),
-        ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
-        ("esc ← h", "Back to the list (esc quits there)"),
-        ("q", "Quit"),
-        ("C", "To the comments, and back"),
-        ("] [", "Next / previous comment (or heading)"),
-        ("} {", "Next / previous thread, skipping replies"),
-        ("space", "On a comment: fold it and its replies, or unfold"),
-        ("F E", "Fold every thread to one line / unfold everything"),
-        ("o", "Outline: the text follows as you move (/ filters)"),
-        ("O", "Keep the outline open beside the story"),
-        ("w W", "Open the story's link / its HN page in the browser"),
-        ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
-        ("1-7", "Top, New, Best, Ask, Show, Jobs; Saved"),
-        ("s", "Search all of HN's stories (or open an HN link or id)"),
-        ("i", "Replies to you, to your latest comments and stories"),
-        ("S", "Save the story to read later, or no longer"),
-        ("x X", "Hide the story from the lists, or bring it back / show the hidden"),
-        ("v", "Upvote the selected comment, or above the comments, the story"),
-        ("r", "Reply to the selected comment, or above the comments, the story"),
-        ("L", "Log in to HN, or out"),
-        ("R", "Reload"),
-        ("t", "Pick a color theme"),
-        ("/ n N", "Search; next / previous match"),
-        ("^s ^r", "Search forward / back; typing: next / previous"),
-        ("f", "Follow a link (type the letters shown on it)"),
-        ("J K", "Page down / up (⇧↓ ⇧↑ too, in the list)"),
-        ("space b", "Page down / up (the preview, in the list)"),
-        ("d u", "Half page down / up"),
-        ("g G", "Top / bottom"),
-        ("^n ^p", "Emacs: down / up"),
-        ("^v M-v", "Emacs: page down / up"),
-        ("M-< M->", "Emacs: top / bottom (^g: esc)"),
-        ("/", "Filter the list by title (fuzzy)"),
-        ("\\", "Show or hide the list while reading"),
-        ("Q", "Quit from anywhere"),
-        ("^z", "Suspend: fg in the shell comes back"),
+    /// The keys, by what they're for.
+    const SECTIONS: &[(&str, &[(&str, &str)])] = &[
+        (
+            "Moving",
+            &[
+                ("↑↓ j k", "Move / scroll; in the comments, comment by comment"),
+                ("J K", "Page down / up (⇧↓ ⇧↑ too, in the list)"),
+                ("space b", "Page down / up (the preview, in the list)"),
+                ("d u", "Half page down / up"),
+                ("g G", "Top / bottom"),
+                ("^n ^p", "Emacs: down / up"),
+                ("^v M-v", "Emacs: page down / up"),
+                ("M-< M->", "Emacs: top / bottom (^g: esc)"),
+            ],
+        ),
+        (
+            "Stories",
+            &[
+                ("⏎ → l", "Read the selected story full screen"),
+                ("⏎", "Reading: beside the list, full screen; full screen, back to the list"),
+                ("tab", "Between the list and the story (both stay, if there's room)"),
+                ("\\", "Show or hide the list while reading"),
+                ("esc ← h", "Back to the list (esc quits there)"),
+                ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
+                ("1-7", "Top, New, Best, Ask, Show, Jobs; Saved"),
+                ("/", "Filter the list by title (fuzzy)"),
+                ("s", "Search all of HN's stories (or open an HN link or id)"),
+                ("i", "Replies to you, to your latest comments and stories"),
+            ],
+        ),
+        (
+            "Comments",
+            &[
+                ("C", "To the comments, and back"),
+                ("] [", "Next / previous comment (or heading)"),
+                ("} {", "Next / previous thread, skipping replies"),
+                ("space", "On a comment: fold it and its replies, or unfold"),
+                ("F E", "Fold every thread to one line / unfold everything"),
+                ("o", "Outline: the text follows as you move (/ filters)"),
+                ("O", "Keep the outline open beside the story"),
+            ],
+        ),
+        (
+            "Links and searching",
+            &[
+                ("f", "Follow a link (type the letters shown on it)"),
+                ("w W", "Open the story's link / its HN page in the browser"),
+                ("/ n N", "Reading: search; next / previous match"),
+                ("^s ^r", "Search forward / back; typing: next / previous"),
+            ],
+        ),
+        (
+            "Yours",
+            &[
+                ("v", "Upvote the selected comment, or above the comments, the story"),
+                ("r", "Reply to the selected comment, or above the comments, the story"),
+                ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
+                ("S", "Save the story to read later, or no longer"),
+                ("x X", "Hide the story from the lists, or bring it back / show the hidden"),
+                ("L", "Log in to HN, or out"),
+            ],
+        ),
+        (
+            "Everything else",
+            &[
+                ("R", "Reload"),
+                ("t", "Pick a color theme"),
+                ("^z", "Suspend: fg in the shell comes back"),
+                ("q", "Quit"),
+                ("Q", "Quit from anywhere"),
+            ],
+        ),
     ];
-    let key_width = KEYS.iter().map(|(k, _)| wrap::width(k)).max().unwrap_or(0);
-    let rows: Vec<Line> = KEYS
+    let key_width = SECTIONS
         .iter()
-        .map(|(k, what)| {
+        .flat_map(|(_, keys)| keys.iter())
+        .map(|(k, _)| wrap::width(k))
+        .max()
+        .unwrap_or(0);
+    let mut rows: Vec<Line> = Vec::new();
+    let mut breaks = Vec::new();
+    for (title, keys) in SECTIONS {
+        if !rows.is_empty() {
+            breaks.push(rows.len());
+            rows.push(Line::default());
+        }
+        rows.push(Line::from(title.bold().underlined()));
+        rows.extend(keys.iter().map(|(k, what)| {
             let pad = key_width - wrap::width(k);
             Line::from(vec![
                 format!("{k}{}   ", " ".repeat(pad)).bold(),
                 Span::raw(*what),
             ])
-        })
-        .collect();
+        }));
+    }
     let area = f.area();
-    let mut lines = help_columns(rows, area);
+    let mut lines = help_columns(rows, &breaks, area);
     lines.push(Line::default());
     lines.push(Line::from("Press any key to close").dim());
     let width = (lines.iter().map(Line::width).max().unwrap_or(0) as u16 + 4).min(area.width);
@@ -2293,7 +2335,10 @@ fn section_trail(section: &[String], room: usize) -> Option<String> {
 
 /// The help's rows, in one column, or in two side by side when one is too
 /// tall for the screen and two fit across it.
-fn help_columns(rows: Vec<Line<'static>>, area: Rect) -> Vec<Line<'static>> {
+/// `rows` in two columns side by side, when they're too tall for `area`
+/// and there's room: split at the blank line of `breaks` nearest halfway,
+/// so a section stays whole, or else halfway.
+fn help_columns(rows: Vec<Line<'static>>, breaks: &[usize], area: Rect) -> Vec<Line<'static>> {
     // The border and padding, and the blank line and "Press any key" below.
     const FRAME_HEIGHT: usize = 4;
     const FRAME_WIDTH: usize = 4;
@@ -2303,17 +2348,22 @@ fn help_columns(rows: Vec<Line<'static>>, area: Rect) -> Vec<Line<'static>> {
     if !tall || 2 * column + GAP + FRAME_WIDTH > usize::from(area.width) {
         return rows;
     }
-    let half = rows.len().div_ceil(2);
+    // The taller column as short as can be; on a tie, the left the taller.
+    let tallest = |b: usize| (b.max(rows.len() - b - 1), std::cmp::Reverse(b));
+    let (half, skip) = match breaks.iter().copied().min_by_key(|&b| tallest(b)) {
+        Some(b) => (b, 1),
+        None => (rows.len().div_ceil(2), 0),
+    };
     let mut rows = rows.into_iter();
     let left: Vec<Line> = rows.by_ref().take(half).collect();
-    let right: Vec<Line> = rows.collect();
-    let mut right = right.into_iter();
-    left.into_iter()
-        .map(|mut line| {
-            if let Some(r) = right.next() {
+    let right: Vec<Line> = rows.skip(skip).collect();
+    (0..left.len().max(right.len()))
+        .map(|i| {
+            let mut line = left.get(i).cloned().unwrap_or_default();
+            if let Some(r) = right.get(i) {
                 let pad = column - line.width() + GAP;
                 line.spans.push(Span::raw(" ".repeat(pad)));
-                line.spans.extend(r.spans);
+                line.spans.extend(r.spans.clone());
             }
             line
         })
@@ -2379,11 +2429,17 @@ mod tests {
         let rows =
             || -> Vec<Line<'static>> { (0..10).map(|i| Line::from(format!("row {i}"))).collect() };
         let area = |width, height| Rect::new(0, 0, width, height);
-        assert_eq!(help_columns(rows(), area(80, 14)).len(), 10);
-        let two = help_columns(rows(), area(80, 13));
+        assert_eq!(help_columns(rows(), &[], area(80, 14)).len(), 10);
+        let two = help_columns(rows(), &[], area(80, 13));
         assert_eq!(two.len(), 5);
         assert_eq!(text(&two[0]), "row 0    row 5");
-        assert_eq!(help_columns(rows(), area(17, 13)).len(), 10);
+        assert_eq!(help_columns(rows(), &[], area(17, 13)).len(), 10);
+        // At the break nearest halfway, without its blank line: a section
+        // stays whole.
+        let two = help_columns(rows(), &[3, 6], area(80, 13));
+        assert_eq!(two.len(), 6);
+        assert_eq!(text(&two[0]), "row 0    row 7");
+        assert_eq!(text(&two[5]), "row 5");
     }
 
     #[test]
