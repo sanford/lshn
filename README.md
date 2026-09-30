@@ -77,6 +77,7 @@ Reading:
 | `O` | Keep the outline open beside the story |
 | `/` `n` `N` | Search the story; next and previous match |
 | `f` | Follow a link: type the letters drawn on it |
+| `Enter` | Beside the list, the story full screen; full screen, back to the list, where you were, with the story beside it |
 | `Esc` `←` `h` `Backspace` | Back to where you followed a link from, then to the list. `←` never quits, however many times you press it |
 | `Ctrl-J` `Ctrl-K` (or `Ctrl-↓` `Ctrl-↑`, `⇧↓` `⇧↑`, `>` `<`) | Next and previous story: what `↓` and `↑` do in the list |
 | `\` | Keep the list on screen while reading |

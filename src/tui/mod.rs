@@ -45,6 +45,9 @@ const PREFETCH_AHEAD: usize = 5;
 /// the story: the story beside it still gets about 75 columns of text, a
 /// better line length for reading than the whole width.
 const WIDE: u16 = 130;
+/// Narrower than this, there's only room for one pane: the list, or the
+/// story.
+const NARROW: u16 = 80;
 /// How long the picture waits for scrolling to stop before it's drawn.
 const FIGURE_SETTLE: Duration = Duration::from_millis(150);
 
@@ -1478,6 +1481,16 @@ impl App {
     }
 
     fn reader_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
+        // Enter: the story beside the list to full screen, and full screen
+        // back to the list, where it was, with the story beside it.
+        if key.code == KeyCode::Enter {
+            if self.list_in_reader && self.body_width >= NARROW {
+                self.list_in_reader = false;
+            } else {
+                self.leave_reader();
+            }
+            return false;
+        }
         // Of the Ctrl keys, only Emacs's searches are for getting around.
         let search = matches!(key.code, KeyCode::Char('s' | 'r'));
         if (!ctrl || search) && self.nav_key(key) {
@@ -1551,7 +1564,7 @@ impl App {
             KeyCode::Char('f') if ctrl => doc.scroll_by(page),
             KeyCode::Char('b') if ctrl => doc.scroll_by(-page),
             // By line in the article, by comment in the comments.
-            KeyCode::Char('j') | KeyCode::Down | KeyCode::Enter => doc.step(true, lines),
+            KeyCode::Char('j') | KeyCode::Down => doc.step(true, lines),
             KeyCode::Char('k') | KeyCode::Up => doc.step(false, lines),
             KeyCode::Char('d') => doc.scroll_by(half),
             KeyCode::Char('u') => doc.scroll_by(-half),
@@ -1575,7 +1588,7 @@ impl App {
         self.list_area = Rect::default();
         let reader_only = self.focus == Focus::Reader && !self.list_in_reader;
         self.body_width = body.width;
-        let narrow = body.width < 80;
+        let narrow = body.width < NARROW;
         if reader_only || (narrow && self.focus == Focus::Reader) {
             // A column of margin on each side.
             let area = Rect {
@@ -2176,6 +2189,7 @@ fn draw_help(f: &mut Frame) {
     const KEYS: &[(&str, &str)] = &[
         ("↑↓ j k", "Move / scroll; in the comments, comment by comment"),
         ("⏎ → l", "Read the selected story full screen"),
+        ("⏎", "Reading: beside the list, full screen; full screen, back to the list"),
         ("tab", "Between the list and the story (both stay, if there's room)"),
         ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
         ("esc ← h", "Back to the list (esc quits there)"),
@@ -2490,6 +2504,33 @@ mod tests {
         app.focus = Focus::Reader;
         app.follow("https://news.ycombinator.com/item?id=1");
         assert!(app.history.is_empty());
+    }
+
+    /// Enter: from the story beside the list to full screen, and from full
+    /// screen back to the list, on the same story, with it beside.
+    #[test]
+    fn enter_goes_full_screen_and_back() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        app.body_width = 160;
+        app.ids = Some(vec![1, 2, 3]);
+        app.refresh();
+        app.select_by(1);
+        app.key(tab);
+        assert!(app.focus == Focus::Reader && app.list_in_reader);
+        app.key(enter);
+        assert!(app.focus == Focus::Reader && !app.list_in_reader, "full screen");
+        app.key(enter);
+        assert!(app.focus == Focus::List, "back to the list");
+        assert_eq!(app.selected_id(), Some(2), "where it was");
+        assert_eq!(app.current_key(), Some((2, false)), "the story beside it");
+        // Too narrow for two panes: the story's alone, so back to the list.
+        app.body_width = 70;
+        app.list_in_reader = true;
+        app.key(tab);
+        app.key(enter);
+        assert!(app.focus == Focus::List);
     }
 
     /// Tab goes back and forth between the list and the story: on a wide
