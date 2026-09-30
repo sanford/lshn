@@ -132,6 +132,9 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
             crate::figure::set_cell(cell.width, cell.height);
         }
     }
+    // Windows Terminal (WT_SESSION, set for everything run in it, WSL
+    // too) draws pictures fast enough to move with the text.
+    app.smooth_pictures = std::env::var_os("WT_SESSION").is_some();
     if settings.big_titles && crate::sizing::detect() {
         crate::sizing::enable();
     }
@@ -329,6 +332,9 @@ struct App {
     figure_moved: Option<Instant>,
     /// Moving fast: the picture is soft, or waits, till it stops.
     figure_moving: bool,
+    /// The terminal keeps up with pictures sent at a key's repeat rate:
+    /// they stay while moving.
+    smooth_pictures: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
     user_docs: HashMap<String, Doc>,
@@ -452,6 +458,7 @@ impl App {
             figure_at: None,
             figure_moved: None,
             figure_moving: false,
+            smooth_pictures: false,
             docs: HashMap::new(),
             users: HashMap::new(),
             user_docs: HashMap::new(),
@@ -1863,7 +1870,7 @@ impl App {
                 self.drawn.insert(key, drawn);
             }
             let Some(drawn) = self.drawn.get(&key) else { continue };
-            let moving = self.figure_moving;
+            let moving = self.figure_moving && !self.smooth_pictures;
             if moving && !drawn.has_soft() {
                 continue;
             }
