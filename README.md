@@ -14,6 +14,24 @@ With [Homebrew](https://brew.sh), on macOS and Linux:
 brew install sanford/tap/lshn
 ```
 
+On Windows, with [Scoop](https://scoop.sh):
+
+```powershell
+scoop bucket add sanford https://github.com/sanford/scoop-bucket
+scoop install sanford/lshn
+```
+
+Or download `lshn-windows-x64.zip` from the [latest release](https://github.com/sanford/lshn/releases/latest), unzip it, and put `lshn.exe` in a folder on your `PATH`. It needs nothing else installed. Or, from PowerShell:
+
+```powershell
+$dir = "$env:LOCALAPPDATA\Programs\lshn"
+Invoke-WebRequest https://github.com/sanford/lshn/releases/latest/download/lshn-windows-x64.zip -OutFile "$env:TEMP\lshn.zip"
+Expand-Archive "$env:TEMP\lshn.zip" $dir -Force
+[Environment]::SetEnvironmentVariable('Path', "$([Environment]::GetEnvironmentVariable('Path', 'User'));$dir", 'User')
+```
+
+Then open a new terminal and run `lshn`. Windows Terminal draws articles' pictures.
+
 With Cargo, if you have a [Rust toolchain](https://rustup.rs), from [crates.io](https://crates.io/crates/lshn):
 
 ```sh
