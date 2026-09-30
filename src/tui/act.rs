@@ -226,7 +226,9 @@ impl App {
                 }
             },
             Prompt::Logout { user } => {
-                if matches!(key.code, KeyCode::Char('y' | 'Y') | KeyCode::Enter) {
+                // Only y: Enter, as if to go ahead, has logged people out
+                // who meant to log in.
+                if matches!(key.code, KeyCode::Char('y' | 'Y')) {
                     session::forget(store::dir().as_deref());
                     store::set_user(store::dir().as_deref(), None);
                     self.auth = Auth::Out;
@@ -477,8 +479,9 @@ impl App {
                 "  ⏎ ok  esc cancel".dim(),
             ]),
             Prompt::Logout { user } => Line::from(vec![
-                format!(" Log out {user}? ").bold(),
-                "y/n".dim(),
+                format!(" You're logged in as {user}. ").bold(),
+                "y".bold(),
+                " logs out; any other key keeps you logged in".dim(),
             ]),
             Prompt::Post { .. } => Line::from(vec![
                 " y".bold(),

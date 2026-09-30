@@ -135,7 +135,7 @@ pub enum Voted {
 pub fn upvote(session: &Session, id: u64) -> Result<Voted, String> {
     let page = get(session, &format!("item?id={id}"))?;
     if !page.body.contains("logout") {
-        return Err("Not logged in any more: L to log in again".into());
+        return Err(not_logged_in(&page.body));
     }
     let (link, voted) = match vote_link(&page.body, id, "up") {
         Some(link) => (link, Voted::Up),
@@ -182,12 +182,21 @@ pub fn reply_form(session: &Session, id: u64, is_story: bool) -> Result<Form, St
         format!("reply?id={id}")
     };
     let page = get(session, &path)?;
-    if !page.body.contains("logout") {
-        return Err("Not logged in any more: L to log in again".into());
+    // The form is there only when you're logged in. (A reply page has no
+    // "logout" link to tell by, as an item's page has.)
+    if let Some(form) = comment_form(&page.body) {
+        return Ok(form);
     }
-    comment_form(&page.body).ok_or_else(|| {
-        refusal(&page.body).unwrap_or_else(|| "No way to reply to that (too old, or locked?)".into())
-    })
+    if logged_out(&page.body) {
+        return Err(not_logged_in(&page.body));
+    }
+    Err(refusal(&page.body).unwrap_or_else(|| "No way to reply to that (too old, or locked?)".into()))
+}
+
+/// Whether HN's page says you're not logged in: it asks you to, with its
+/// login form.
+fn logged_out(page: &str) -> bool {
+    page.contains("You have to be logged in") || page.contains(r#"name="acct""#)
 }
 
 fn comment_form(page: &str) -> Option<Form> {
@@ -246,6 +255,13 @@ fn refusal(page: &str) -> Option<String> {
     let start = text[..at].rfind(['.', '!', '?']).map_or(0, |i| i + 1);
     let end = text[at..].find(['.', '!', '?']).map_or(text.len(), |i| at + i + 1);
     Some(text[start..end].trim().to_string())
+}
+
+/// Why HN's page says you're not logged in, in its words, as far as they
+/// go on one line.
+fn not_logged_in(page: &str) -> String {
+    let said: String = plain(page).chars().take(80).collect();
+    format!("HN didn't take the login (it said \"{}\"): L to log in again", said.trim())
 }
 
 /// A page's text, without its tags, in one line.
@@ -339,6 +355,16 @@ mod tests {
         assert_eq!(vote_link(ITEM, 43, "up"), None);
         assert_eq!(vote_link(ITEM, 43, "un").as_deref(), Some("vote?id=43&how=un&auth=def"));
         assert_eq!(vote_link(ITEM, 44, "up"), None);
+    }
+
+    #[test]
+    fn tells_a_reply_page_from_being_logged_out() {
+        // What HN sends logged out, and the reply page, which has no
+        // "logout" link however logged in you are.
+        let out = r#"<body>You have to be logged in to reply.<br><br><b>Login</b><form method="post"><input type="text" name="acct"></form>"#;
+        let reply = r#"<body>Add Comment <form action="comment" method="post"><input type="hidden" name="parent" value="40"><input type="hidden" name="goto" value="item?id=40"><input type="hidden" name="hmac" value="f00d"><textarea name="text"></textarea></form>"#;
+        assert!(logged_out(out));
+        assert!(!logged_out(reply) && comment_form(reply).is_some());
     }
 
     #[test]
