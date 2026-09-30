@@ -21,7 +21,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 /// Where articles are cached: numbered, so an article extracted the old way
 /// is extracted again when the way changes.
-const ARTICLES: &str = "article-2";
+const ARTICLES: &str = "article-3";
 
 /// Workers for HN's APIs, and for articles.
 const HN_WORKERS: usize = 8;

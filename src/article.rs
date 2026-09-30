@@ -2,6 +2,7 @@
 //! Markdown, the way a browser's reader mode does.
 
 use crate::hn;
+use dom_query::{Document, NodeRef};
 use dom_smoothie::{Config, Readability, TextMode};
 
 /// Pages bigger than this aren't articles.
@@ -82,7 +83,9 @@ pub fn extract(html: &str, url: &str) -> Article {
         ..Config::default()
     };
     let html = tidy_emphasis(&unhide_streamed(html));
-    let parsed = Readability::new(&*html, Some(url), Some(config)).and_then(|mut r| r.parse());
+    let doc = Document::from(&*html);
+    even_tables(&doc);
+    let parsed = Readability::with_document(doc, Some(url), Some(config)).and_then(|mut r| r.parse());
     match parsed {
         Ok(article) => {
             let md = section_breaks(&drop_metadata(article.text_content.trim()));
@@ -94,6 +97,68 @@ pub fn extract(html: &str, url: &str) -> Article {
         }
         Err(_) => Article::Unreadable("couldn't find the article on the page".into()),
     }
+}
+
+/// Tables made plain enough to come out as tables: a row of headings (`th`)
+/// at the top, then rows of cells (`td`), every row as wide as the widest,
+/// with a cell that spans columns followed by empty ones. Otherwise the
+/// Markdown runs each row's text together: all it takes is a totals row of
+/// `th` and `td` at the bottom, as Backblaze's drive stats have.
+fn even_tables(doc: &Document) {
+    for table in doc.select("table").nodes() {
+        // A table in a table is for layout: left as it is.
+        if table.is("table:has(table)") || table.is("table table") {
+            continue;
+        }
+        let rows = table.find(&["tr"]);
+        let headings = rows.first().is_some_and(|row| {
+            let cells = cells(row);
+            !cells.is_empty() && cells.iter().all(|c| c.is("th"))
+        });
+        let mut widths = Vec::with_capacity(rows.len());
+        for (i, row) in rows.iter().enumerate() {
+            let heading_row = headings && i == 0;
+            let mut width = 0;
+            for cell in cells(row) {
+                if !heading_row && cell.is("th") {
+                    cell.rename("td");
+                }
+                let span = cell
+                    .attr("colspan")
+                    .and_then(|s| s.trim().parse::<usize>().ok())
+                    .unwrap_or(1)
+                    .clamp(1, 100);
+                if span > 1 {
+                    cell.remove_attr("colspan");
+                    let tag = if heading_row { "th" } else { "td" };
+                    for _ in 1..span {
+                        // Made as elements: `<td>` as HTML is dropped, out
+                        // of a table's context.
+                        cell.insert_after(&cell.tree.new_element(tag));
+                    }
+                }
+                width += span;
+            }
+            widths.push(width);
+        }
+        let widest = widths.iter().copied().max().unwrap_or(0);
+        for (i, (row, width)) in rows.iter().zip(widths).enumerate() {
+            if width > 0 && width < widest {
+                let tag = if headings && i == 0 { "th" } else { "td" };
+                for _ in width..widest {
+                    row.append_child(&row.tree.new_element(tag));
+                }
+            }
+        }
+    }
+}
+
+/// A row's cells, headings and all.
+fn cells<'a>(row: &NodeRef<'a>) -> Vec<NodeRef<'a>> {
+    row.element_children()
+        .into_iter()
+        .filter(|c| c.is("td, th"))
+        .collect()
 }
 
 /// React pages that stream (Next.js's, say) send what they render last in
@@ -216,6 +281,28 @@ pub fn minutes(words: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn evens_out_tables_to_come_out_as_tables() {
+        let doc = Document::from(
+            "<table><thead><tr><th>Model</th><th>Count</th><th>AFR</th></tr></thead>\
+             <tbody><tr><td>A1</td><td>12</td><td>1.5</td></tr>\
+             <tr><td colspan=2>merged</td><td>2</td></tr>\
+             <tr><td>short</td></tr></tbody>\
+             <tfoot><tr><th>Totals</th><td></td><th>3.5</th></tr></tfoot></table>",
+        );
+        even_tables(&doc);
+        let md = doc.md(None).to_string();
+        assert_eq!(
+            md.trim(),
+            "| Model | Count | AFR |\n\
+             | ----- | ----- | --- |\n\
+             | A1 | 12 | 1\\.5 |\n\
+             | merged |  | 2 |\n\
+             | short |  |  |\n\
+             | Totals |  | 3\\.5 |",
+        );
+    }
 
     #[test]
     fn extracts_the_article_as_markdown() {

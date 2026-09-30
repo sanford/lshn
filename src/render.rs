@@ -721,16 +721,33 @@ impl Renderer<'_> {
                     .max(1)
             })
             .collect();
-        let words: Vec<usize> = (0..ncols)
+        let longest_word = |c: usize, headers: bool| {
+            rows.iter()
+                .filter(|(header, _)| *header == headers)
+                .map(|(_, cells)| wrap::longest_word(&cells[c]))
+                .max()
+                .unwrap_or(0)
+        };
+        let borders = 3 * ncols + 1;
+        let room = self.avail().saturating_sub(borders);
+        let head_words: Vec<usize> = (0..ncols).map(|c| longest_word(c, true)).collect();
+        let body_words: Vec<usize> = (0..ncols).map(|c| longest_word(c, false)).collect();
+        let numbers: Vec<bool> = (0..ncols)
             .map(|c| {
-                rows.iter()
-                    .map(|(_, cells)| wrap::longest_word(&cells[c]))
-                    .max()
-                    .unwrap_or(0)
+                let body = rows.iter().filter(|(header, _)| !header).map(|(_, cells)| &cells[c]);
+                body.clone().any(|cell| !cell.is_empty())
+                    && body.map(|cell| cell_text(cell)).all(|t| t.is_empty() || is_number(&t))
             })
             .collect();
-        let borders = 3 * ncols + 1;
-        let widths = fit_columns(&natural, &words, self.avail().saturating_sub(borders));
+        let widths = fit_columns(&natural, &head_words, &body_words, &numbers, room);
+        // Columns of numbers, unless the table says otherwise, on the right,
+        // where their digits line up.
+        let aligns: Vec<TableAlignment> = (0..ncols)
+            .map(|c| match aligns[c] {
+                TableAlignment::None if numbers[c] => TableAlignment::Right,
+                align => align,
+            })
+            .collect();
 
         let border = self.theme.border();
         let rule = |l: &str, m: &str, r: &str| {
@@ -979,20 +996,87 @@ pub(crate) fn plain_text(node: Node<'_>) -> String {
 /// widths. If there's room, every column first gets enough for its longest
 /// word (`words`), so words aren't split. Every column gets at least 1, even
 /// if that overflows `room`.
-fn fit_columns(natural: &[usize], words: &[usize], room: usize) -> Vec<usize> {
+/// Widths for a table's columns in `room`, from each one's `natural` width
+/// (its widest cell on one line) and its longest word, in its `heads` (the
+/// headings) and in its `body` (the rows under them). Every word whole, where
+/// there's room. Where there isn't, the headings' words break first, then
+/// the words in columns that aren't `numbers`: a number never does, unless
+/// nothing else can. What room's left goes to keeping the headings' words
+/// whole, then to the widest cells.
+fn fit_columns(
+    natural: &[usize],
+    heads: &[usize],
+    body: &[usize],
+    numbers: &[bool],
+    room: usize,
+) -> Vec<usize> {
     if natural.iter().sum::<usize>() <= room {
         return natural.to_vec();
     }
-    let min: Vec<usize> = natural.iter().zip(words).map(|(&n, &w)| n.min(w)).collect();
-    let min_total: usize = min.iter().sum();
-    let widths = if min_total <= room {
-        let want: Vec<usize> = natural.iter().zip(&min).map(|(n, m)| n - m).collect();
-        let extra = share(&want, room - min_total);
-        min.iter().zip(extra).map(|(m, e)| m + e).collect()
-    } else {
-        share(natural, room)
+    let heads: Vec<usize> = natural.iter().zip(heads).map(|(&n, &w)| n.min(w)).collect();
+    let body: Vec<usize> = natural.iter().zip(body).map(|(&n, &w)| n.min(w)).collect();
+    let all: Vec<usize> = heads.iter().zip(&body).map(|(&h, &b)| h.max(b)).collect();
+    let numbers_whole: Vec<usize> = body
+        .iter()
+        .zip(numbers)
+        .map(|(&m, &number)| if number { m } else { m.min(NARROWEST) })
+        .collect();
+    let Some(mut widths) = [all.clone(), body, numbers_whole]
+        .into_iter()
+        .find(|min| min.iter().sum::<usize>() <= room)
+    else {
+        return share(natural, room).into_iter().map(|w| w.max(1)).collect();
     };
+    // Whole words: as many as fit, the shortest first. Then wider cells,
+    // evenly.
+    let passes: [(&[usize], Split); 3] = [(&heads, fill), (&all, fill), (natural, share)];
+    for (goal, split) in passes {
+        let left = room - widths.iter().sum::<usize>();
+        let want: Vec<usize> = goal.iter().zip(&widths).map(|(g, w)| g.saturating_sub(*w)).collect();
+        for (w, extra) in widths.iter_mut().zip(split(&want, left)) {
+            *w += extra;
+        }
+    }
     widths.into_iter().map(|w| w.max(1)).collect()
+}
+
+/// The fewest columns a column of words is squeezed to, to make room for
+/// numbers.
+const NARROWEST: usize = 4;
+
+/// A table cell's text, on one line.
+fn cell_text(cell: &[Piece]) -> String {
+    wrap::wrap(cell, usize::MAX / 2)
+        .iter()
+        .flat_map(|l| l.iter().map(|s| s.content.to_string()))
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Whether a cell's text is a number, as tables write them: `1,190,182`,
+/// `3.34`, `-2`, `12%`, `$4.50`.
+fn is_number(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_digit())
+        && text
+            .chars()
+            .all(|c| c.is_ascii_digit() || ",.%+-−$€£¥ ".contains(c))
+}
+
+/// A way of splitting room among claims on it: [`fill`] or [`share`].
+type Split = fn(&[usize], usize) -> Vec<usize>;
+
+/// Meets claims of `want` in full, the smallest first, while there's
+/// `room`; the first that doesn't fit gets what's left.
+fn fill(want: &[usize], mut room: usize) -> Vec<usize> {
+    let mut got = vec![0; want.len()];
+    let mut order: Vec<usize> = (0..want.len()).collect();
+    order.sort_by_key(|&c| want[c]);
+    for c in order {
+        got[c] = want[c].min(room);
+        room -= got[c];
+    }
+    got
 }
 
 /// Splits `room` among claims of `want`: small claims are met in full, and
@@ -1088,11 +1172,28 @@ mod tests {
 
     #[test]
     fn fits_columns() {
-        assert_eq!(fit_columns(&[3, 4], &[3, 4], 10), [3, 4]);
-        assert_eq!(fit_columns(&[3, 40, 40], &[3, 5, 5], 23), [3, 10, 10]);
+        let no = [false; 3];
+        assert_eq!(fit_columns(&[3, 4], &[0, 0], &[3, 4], &no, 10), [3, 4]);
+        assert_eq!(fit_columns(&[3, 40, 40], &[0, 0, 0], &[3, 5, 5], &no, 23), [3, 10, 10]);
         // The long-worded column keeps its word whole.
-        assert_eq!(fit_columns(&[20, 20], &[12, 3], 20), [15, 5]);
-        assert_eq!(fit_columns(&[5, 5], &[5, 5], 1), [1, 1]);
+        assert_eq!(fit_columns(&[20, 20], &[0, 0], &[12, 3], &no, 20), [15, 5]);
+        assert_eq!(fit_columns(&[5, 5], &[0, 0], &[5, 5], &no, 1), [1, 1]);
+        // No room for every word: the number stays whole, the word breaks.
+        assert_eq!(fit_columns(&[15, 9], &[5, 4], &[15, 9], &[false, true], 16), [7, 9]);
+        // Headings' words break before the cells' words; what's left over
+        // keeps as many headings' words whole as it can, the shortest first.
+        assert_eq!(fit_columns(&[9, 8, 15], &[8, 8, 5], &[2, 4, 15], &[true, true, false], 17), [4, 8, 5]);
+    }
+
+    #[test]
+    fn keeps_numbers_whole_and_on_the_right() {
+        let md = "| Model | Drive Days | Note |\n|---|---|---|\n| HUH721212ALE600 | 1,190,182 | ok |\n| ST8000 | 3.34% | |\n";
+        let text = plain(md, 36);
+        // Too narrow for the headings' words: "Days" breaks, "1,190,182" doesn't.
+        assert!(text.contains("1,190,182"), "{text}");
+        assert!(text.contains("│     3.34% │"), "on the right: {text}");
+        assert!(text.contains("│ ok"), "words stay on the left: {text}");
+        assert!(is_number("-2") && is_number("12%") && !is_number("v2") && !is_number("-"));
     }
 
     #[test]

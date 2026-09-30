@@ -1,5 +1,6 @@
 ---
 source: src/render.rs
+assertion_line: 1351
 expression: "plain(md, 24)"
 ---
 title: Everything
@@ -66,19 +67,18 @@ an html break.
 
     indented code
 
-┌──────┬───────┬───────┐
-│ Left │ Cente │ Right │
-│      │   r   │       │
-├──────┼───────┼───────┤
-│ a    │   b   │     c │
-│ a    │ 日本  │    42 │
-│ long │  語   │       │
-│ er   │       │       │
-│ cell │       │       │
-│ that │       │       │
-│ wrap │       │       │
-│ s    │       │       │
-└──────┴───────┴───────┘
+┌────────┬────────┬────┐
+│ Left   │ Center │ Ri │
+│        │        │ gh │
+│        │        │  t │
+├────────┼────────┼────┤
+│ a      │   b    │  c │
+│ a      │ 日本語 │ 42 │
+│ longer │        │    │
+│ cell   │        │    │
+│ that   │        │    │
+│ wraps  │        │    │
+└────────┴────────┴────┘
 
 ────────────────────────
 

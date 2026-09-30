@@ -1867,6 +1867,7 @@ dependencies = [
  "clap_mangen",
  "comrak",
  "crossterm",
+ "dom_query",
  "dom_smoothie",
  "getrandom 0.4.3",
  "image",

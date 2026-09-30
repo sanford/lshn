@@ -29,6 +29,8 @@ toml = "1.1.6"
 omarchy-themes = "=0.1.0"
 ureq = { version = "3.4.2", features = ["json"] }
 dom_smoothie = "0.18.2"
+# dom_smoothie's, to even out tables before it reads the page. Keep in step.
+dom_query = "0.28.0"
 # The system's store for secrets: Keychain, Credential Manager, Secret Service.
 keyring = "4.2.0"
 # Where there's no keyring: the session, encrypted with a passphrase.
