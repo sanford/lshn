@@ -1,0 +1,53 @@
+name: CI
+
+# Windows only: macOS is where lshn's made and tried, and the release
+# workflow builds and tests each release on Linux.
+#
+# Pushes only, never pull requests: the job runs on a self-hosted runner, and
+# this repo is public, so code from forks must never reach it. (Pushes to a
+# fork run in the fork's own Actions, without our runner.)
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs the owners start (a push, a manual run, a re-run) go straight
+  # through. Anyone else's wait here, on a GitHub-hosted runner, until an
+  # owner approves them in the `approval` environment. The owners' accounts
+  # are the TRUSTED_ACTORS repository variable, a JSON list; without it,
+  # every run waits.
+  approve:
+    if: ${{ !contains(fromJSON(vars.TRUSTED_ACTORS || '[]'), github.triggering_actor) }}
+    runs-on: ubuntu-latest
+    environment: approval
+    steps:
+      - run: echo "Approved for ${{ github.triggering_actor }}"
+
+  windows:
+    needs: approve
+    if: ${{ !cancelled() && (needs.approve.result == 'success' || needs.approve.result == 'skipped') }}
+    runs-on: [self-hosted, Windows, X64]
+    # The toolchain is installed machine-wide, in the folder named by the
+    # RUST_DIR secret (a secret so the logs don't show the machine's layout),
+    # so the runner service needs no environment of its own.
+    env:
+      RUSTUP_HOME: ${{ secrets.RUST_DIR }}\rustup
+      CARGO_HOME: ${{ secrets.RUST_DIR }}\cargo
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - run: Add-Content $env:GITHUB_PATH "$env:CARGO_HOME\bin"
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - run: cargo test --locked --release
+      - run: cargo clippy --locked --release --all-targets -- -D warnings
+      # Neither step above leaves a lshn.exe behind; tests build their own binaries.
+      - run: cargo build --locked --release
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: lshn-windows-x64
+          path: target/release/lshn.exe
+          if-no-files-found: error
