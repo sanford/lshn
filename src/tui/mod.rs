@@ -133,9 +133,6 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
             crate::figure::set_cell(cell.width, cell.height);
         }
     }
-    // Windows Terminal (WT_SESSION, set for everything run in it, WSL
-    // too) draws pictures fast enough to move with the text.
-    app.smooth_pictures = std::env::var_os("WT_SESSION").is_some();
     if settings.big_titles && crate::sizing::detect() {
         crate::sizing::enable();
     }
@@ -345,11 +342,8 @@ struct App {
     /// and when they moved.
     figure_at: Option<(u64, usize)>,
     figure_moved: Option<Instant>,
-    /// Moving fast: the picture is soft, or waits, till it stops.
+    /// Moving fast: iTerm2's pictures are soft till it stops.
     figure_moving: bool,
-    /// The terminal keeps up with pictures sent at a key's repeat rate:
-    /// they stay while moving.
-    smooth_pictures: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
     user_docs: HashMap<String, Doc>,
@@ -471,7 +465,6 @@ impl App {
             figure_at: None,
             figure_moved: None,
             figure_moving: false,
-            smooth_pictures: false,
             docs: HashMap::new(),
             users: HashMap::new(),
             user_docs: HashMap::new(),
@@ -1895,10 +1888,11 @@ impl App {
             self.figure_moving = false;
             return;
         };
-        // Pictures are sent again whenever they move, which is a lot for a
-        // terminal to keep up with at a key's repeat rate: moving again
-        // soon after the last move, they're shown with less detail, or not
-        // at all, till things settle.
+        // iTerm2's pictures are sent again whenever they move, a lot for it
+        // to keep up with at a key's repeat rate: moving again soon after
+        // the last move, they're shown with less detail till things settle.
+        // Other terminals keep up (Kitty's are sent once, and only placed
+        // after), so theirs move as they are.
         let now = Instant::now();
         let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
         if self.figure_at != Some((id, top)) {
@@ -1920,10 +1914,7 @@ impl App {
                 self.drawn.insert(key, drawn);
             }
             let Some(drawn) = self.drawn.get(&key) else { continue };
-            let moving = self.figure_moving && !self.smooth_pictures;
-            if moving && !drawn.has_soft() {
-                continue;
-            }
+            let moving = self.figure_moving;
             // Centred over the text.
             let x = figure.width.saturating_sub(figure.cols) / 2;
             drawn.draw(f.buffer_mut(), area, x as u16, y, moving);
