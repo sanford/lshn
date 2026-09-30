@@ -88,7 +88,7 @@ Anywhere:
 |---|---|
 | `w` `W` | Open the story's link, or its HN page, in the browser |
 | `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article. `v` there selects lines from the keyboard: `j` `k` for more or less, then `c` |
-| `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story |
+| `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story. Again takes the vote back |
 | `r` | Reply to the same: write it in your editor, see it, then post it |
 | `i` | Replies to you (see below) |
 | `L` | Log in to HN, or out |

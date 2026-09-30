@@ -2240,7 +2240,7 @@ fn draw_help(f: &mut Frame) {
         (
             "Yours",
             &[
-                ("v", "Upvote the selected comment, or above the comments, the story"),
+                ("v", "Upvote the selected comment, or above the comments, the story; again, unvote"),
                 ("r", "Reply to the selected comment, or above the comments, the story"),
                 ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
                 ("S", "Save the story to read later, or no longer"),

@@ -321,10 +321,11 @@ impl App {
         }
     }
 
-    pub(super) fn upvoted(&mut self, result: Result<(), String>) {
+    pub(super) fn upvoted(&mut self, result: Result<auth::Voted, String>) {
         self.flash = Some(match result {
-            Ok(()) => "Upvoted".into(),
-            Err(e) => format!("Not upvoted: {e}"),
+            Ok(auth::Voted::Up) => "Upvoted: v again takes it back".into(),
+            Ok(auth::Voted::Un) => "Unvoted".into(),
+            Err(e) => format!("Not voted: {e}"),
         });
     }
 

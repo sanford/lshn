@@ -123,37 +123,46 @@ fn user_cookie(header: &str) -> Option<String> {
     (value.contains('&') && !value.is_empty()).then(|| value.to_string())
 }
 
-/// Upvotes item `id`, a story or a comment.
-pub fn upvote(session: &Session, id: u64) -> Result<(), String> {
+/// What voting did: upvoted, or took an upvote back.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Voted {
+    Up,
+    Un,
+}
+
+/// Upvotes item `id`, a story or a comment; or if you have already, takes
+/// the vote back, as HN's "unvote" does.
+pub fn upvote(session: &Session, id: u64) -> Result<Voted, String> {
     let page = get(session, &format!("item?id={id}"))?;
     if !page.body.contains("logout") {
         return Err("Not logged in any more: L to log in again".into());
     }
-    let Some(link) = vote_link(&page.body, id) else {
-        return Err(if page.body.contains(&format!("id='un_{id}'")) {
-            "Already upvoted".into()
-        } else {
-            "No way to vote on that".into()
-        });
+    let (link, voted) = match vote_link(&page.body, id, "up") {
+        Some(link) => (link, Voted::Up),
+        None => match vote_link(&page.body, id, "un") {
+            Some(link) => (link, Voted::Un),
+            None => return Err("No way to vote on that".into()),
+        },
     };
     let r = get(session, &link)?;
     match r.status {
-        200..=399 if refusal(&r.body).is_none() => Ok(()),
+        200..=399 if refusal(&r.body).is_none() => Ok(voted),
         _ => Err(refusal(&r.body).unwrap_or_else(|| format!("HN said {}", r.status))),
     }
 }
 
-/// The link that upvotes item `id`, from a page it's on: its `href`,
-/// "vote?id=…&how=up&auth=…". Not there when you've voted on it already.
-fn vote_link(page: &str, id: u64) -> Option<String> {
-    let at = page.find(&format!("id='up_{id}'"))?;
+/// The link that votes on item `id` `how` ("up", or "un" to take a vote
+/// back), from a page it's on: its `href`, "vote?id=…&how=up&auth=…". The
+/// upvote's isn't there once you've voted, the unvote's until you have.
+fn vote_link(page: &str, id: u64, how: &str) -> Option<String> {
+    let at = page.find(&format!("id='{how}_{id}'"))?;
     let tag = &page[at..at + page[at..].find('>')?];
     if tag.contains("nosee") {
         return None;
     }
     let href = attr(tag, "href")?;
     let href = href.replace("&amp;", "&");
-    href.starts_with("vote?").then_some(href)
+    (href.starts_with("vote?") && href.contains(&format!("how={how}"))).then_some(href)
 }
 
 /// What's needed to post a comment: where it goes, and the form's token.
@@ -321,13 +330,15 @@ mod tests {
     <a id='logout' href="logout?auth=x&amp;goto=news">logout</a></html>"#;
 
     #[test]
-    fn finds_vote_links_but_not_for_what_youve_voted_on() {
+    fn finds_vote_links_and_unvote_links_for_what_youve_voted_on() {
         assert_eq!(
-            vote_link(ITEM, 42).as_deref(),
+            vote_link(ITEM, 42, "up").as_deref(),
             Some("vote?id=42&how=up&auth=abc123&goto=item%3Fid%3D40#42")
         );
-        assert_eq!(vote_link(ITEM, 43), None);
-        assert_eq!(vote_link(ITEM, 44), None);
+        assert_eq!(vote_link(ITEM, 42, "un"), None, "not voted on yet");
+        assert_eq!(vote_link(ITEM, 43, "up"), None);
+        assert_eq!(vote_link(ITEM, 43, "un").as_deref(), Some("vote?id=43&how=un&auth=def"));
+        assert_eq!(vote_link(ITEM, 44, "up"), None);
     }
 
     #[test]

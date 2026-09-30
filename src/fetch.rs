@@ -66,7 +66,7 @@ pub enum Got {
     User(String, Result<User, String>),
     Replies(String, Result<Replies, String>),
     LoggedIn(Result<Session, String>),
-    Upvoted(Result<(), String>),
+    Upvoted(Result<auth::Voted, String>),
     ReplyForm(u64, Result<Form, String>),
     /// A reply posted, or not, to the story with this id.
     Posted(u64, Result<(), String>),
