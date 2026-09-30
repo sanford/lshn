@@ -23,6 +23,20 @@ pub enum Article {
     Text { md: String, words: usize },
     /// Why there's nothing to show: "a PDF", "a video", an error.
     Unreadable(String),
+    /// A page with no text to pull out, and what it says about itself
+    /// instead, as Markdown: its picture and description, from its tags.
+    /// `scripted`: it draws its text with JavaScript, in a browser.
+    About { scripted: bool, md: String },
+}
+
+impl Article {
+    /// The Markdown to show, and look in for pictures.
+    pub fn md(&self) -> Option<&str> {
+        match self {
+            Article::Text { md, .. } | Article::About { md, .. } => Some(md),
+            Article::Unreadable(_) => None,
+        }
+    }
 }
 
 pub fn fetch(url: &str) -> Article {
@@ -86,17 +100,65 @@ pub fn extract(html: &str, url: &str) -> Article {
     let doc = Document::from(&*html);
     even_tables(&doc);
     let parsed = Readability::with_document(doc, Some(url), Some(config)).and_then(|mut r| r.parse());
-    match parsed {
-        Ok(article) => {
-            let md = section_breaks(&drop_metadata(article.text_content.trim()));
-            if md.is_empty() {
-                return Article::Unreadable("no article text found".into());
-            }
-            let words = md.split_whitespace().count();
-            Article::Text { md, words }
-        }
-        Err(_) => Article::Unreadable("couldn't find the article on the page".into()),
+    let md = match parsed {
+        Ok(article) => section_breaks(&drop_metadata(article.text_content.trim())),
+        Err(_) => String::new(),
+    };
+    if md.is_empty() {
+        return about(&html, url);
     }
+    let words = md.split_whitespace().count();
+    Article::Text { md, words }
+}
+
+/// A page with no article on it: what it says about itself, or else that
+/// there's nothing.
+fn about(html: &str, url: &str) -> Article {
+    let doc = Document::from(html);
+    let meta = |names: &[&str]| {
+        names.iter().find_map(|name| {
+            let tags = doc.select(&format!(r#"meta[property="{name}"], meta[name="{name}"]"#));
+            let content = tags.attr("content")?.trim().to_string();
+            (!content.is_empty()).then_some(content)
+        })
+    };
+    let description = meta(&["og:description", "twitter:description", "description"]);
+    let picture = meta(&["og:image", "twitter:image"]).and_then(|src| absolute(url, &src));
+    let alt = meta(&["og:image:alt", "twitter:image:alt"]).unwrap_or_default();
+    // Drawn by scripts: it has some, and next to no text without them.
+    let scripts = doc.select("script").exists();
+    doc.select("script, style, noscript, template").remove();
+    let words = doc.select("body").text().split_whitespace().count();
+    let scripted = scripts && words < 50;
+    if !scripted && description.is_none() && picture.is_none() {
+        return Article::Unreadable("couldn't find the article on the page".into());
+    }
+    let mut md = String::new();
+    if let Some(src) = picture {
+        md.push_str(&format!("![{}](<{src}>)\n\n", crate::story::escape(&alt)));
+    }
+    if let Some(description) = description {
+        md.push_str(&crate::story::escape(&description));
+    }
+    Article::About { scripted, md }
+}
+
+/// `src` as an absolute address, from the page at `page`.
+fn absolute(page: &str, src: &str) -> Option<String> {
+    if src.starts_with("https://") || src.starts_with("http://") {
+        return Some(src.to_string());
+    }
+    let (scheme, rest) = page.split_once("://")?;
+    if let Some(rest) = src.strip_prefix("//") {
+        return Some(format!("{scheme}://{rest}"));
+    }
+    let origin = format!("{scheme}://{}", rest.split('/').next()?);
+    if src.starts_with('/') {
+        return Some(format!("{origin}{src}"));
+    }
+    // Relative to the page's folder.
+    let folder = page.rsplit_once('/').map_or(page, |(folder, _)| folder);
+    Some(format!("{folder}/{src}"))
 }
 
 /// Tables made plain enough to come out as tables: a row of headings (`th`)
@@ -380,6 +442,33 @@ mod tests {
     fn names_what_isnt_a_page() {
         assert_eq!(describe("application/pdf"), "a PDF");
         assert_eq!(describe("image/png; x=y"), "an image");
+    }
+
+    #[test]
+    fn says_what_a_page_without_an_article_is_about() {
+        let url = "https://example.com/blog/post";
+        // An app's shell: its text comes from its scripts.
+        let shell = r#"<html><head><title>Post</title>
+            <meta property="og:description" content="A tale & more">
+            <meta property="og:image" content="/blog/post/cover.jpg">
+            <meta property="og:image:alt" content="The cover">
+            <script type="module" src="/assets/app.js"></script></head>
+            <body><div id="root"></div></body></html>"#;
+        match extract(shell, url) {
+            Article::About { scripted: true, md } => {
+                assert!(md.contains("(<https://example.com/blog/post/cover.jpg>)"), "{md}");
+                assert!(md.contains("A tale \\& more"), "{md}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // No scripts, just tags: said, but not blamed on scripts.
+        let tags = r#"<html><head><meta name="description" content="About it"></head><body><p>Hi.</p></body></html>"#;
+        assert!(matches!(extract(tags, url), Article::About { scripted: false, .. } | Article::Text { .. }));
+        // Nothing at all.
+        let empty = "<html><body></body></html>";
+        assert!(matches!(extract(empty, url), Article::Unreadable(_)));
+        assert_eq!(absolute(url, "//cdn.x/a.png").as_deref(), Some("https://cdn.x/a.png"));
+        assert_eq!(absolute(url, "c.jpg").as_deref(), Some("https://example.com/blog/c.jpg"));
     }
 
     #[test]

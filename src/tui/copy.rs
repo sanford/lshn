@@ -152,6 +152,9 @@ impl App {
                 let what = format!("from {site}, {words} words, as Markdown");
                 Item::new('a', "Article", what, Copy::Text(md.clone(), "the article".into()))
             }
+            Some(Article::About { .. }) => {
+                Item::off('a', "Article", "no text on the page: w opens the website in your browser")
+            }
             Some(Article::Unreadable(why)) => {
                 Item::off('a', "Article", format!("couldn't be read: {why}"))
             }

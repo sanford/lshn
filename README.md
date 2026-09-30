@@ -128,7 +128,7 @@ What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stori
 
 ### Where it comes from
 
-Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, with the address and `w` to open it in the browser or `c` to copy it.
+Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, with the address and `w` to open the website in the browser or `c` to copy it. So do pages that show their text with JavaScript, which lshn doesn't run; and a page with no article to read shows what it says about itself instead, its picture and description.
 
 Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer.
 

@@ -774,7 +774,7 @@ impl App {
                 Got::Article(id, article) => {
                     // The first picture of every article fetched; the rest
                     // once it's read.
-                    if let (Some(_), Article::Text { md, .. }) = (&self.picker, &article)
+                    if let (Some(_), Some(md)) = (&self.picker, article.md())
                         && let Some(first) = crate::figure::all(md).into_iter().next()
                     {
                         let urgent = self.current_key().is_some_and(|(on, _)| on == id);

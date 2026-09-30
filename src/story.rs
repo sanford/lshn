@@ -139,21 +139,15 @@ pub type Pictures<'a> = &'a dyn Fn(usize) -> Option<&'a image::DynamicImage>;
 fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures: Pictures) -> String {
     match article {
         None => "*Loading the article…*".into(),
-        // A note with a bar down its left, so it isn't read as the article.
-        Some(Article::Unreadable(why)) => {
-            let mut note = format!(
-                "> [!NOTE] Couldn't read the article\n> {}.",
-                escape(&capitalized(why))
-            );
-            if let Some(url) = &story.url {
-                // The address, and right under it how to get there.
-                note.push_str(&format!(
-                    "\n>\n> [{}](<{}>)\\\n> `w` opens it in your browser, `c` copies it.",
-                    escape(url),
-                    link_target(url)
-                ));
-            }
-            note
+        Some(Article::Unreadable(why)) => note(story, "Couldn't read the article", why),
+        // What the page says about itself, under why that's all.
+        Some(Article::About { scripted, md }) => {
+            let note = if *scripted {
+                note(story, "This page shows its text with JavaScript", "its text only appears in a browser, which runs its scripts")
+            } else {
+                note(story, "Couldn't read the article", "couldn't find the article on the page")
+            };
+            format!("{note}\n\n{}", with_pictures(md, preview, pictures))
         }
         Some(Article::Text { md, words }) => {
             let md = with_pictures(md, preview, pictures);
@@ -169,6 +163,20 @@ fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures:
             }
         }
     }
+}
+
+/// A note with a bar down its left, so it isn't read as the article:
+/// `title`, `why`, then the address and, right under it, how to get there.
+fn note(story: &Story, title: &str, why: &str) -> String {
+    let mut note = format!("> [!NOTE] {title}\n> {}.", escape(&capitalized(why)));
+    if let Some(url) = &story.url {
+        note.push_str(&format!(
+            "\n>\n> [{}](<{}>)\\\n> Press `w` to open the website in your browser, or `c` to copy its address.",
+            escape(url),
+            link_target(url)
+        ));
+    }
+    note
 }
 
 fn capitalized(s: &str) -> String {
@@ -883,9 +891,14 @@ mod tests {
         let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
         assert!(md.contains("> [!NOTE] Couldn't read the article\n> The page is gone."), "{md}");
         assert!(
-            md.contains("> [https://www\\.example\\.com/post](<https://www.example.com/post>)\\\n> `w` opens it"),
+            md.contains("> [https://www\\.example\\.com/post](<https://www.example.com/post>)\\\n> Press `w` to open the website"),
             "{md}"
         );
+        // A page drawn by its scripts says so, and what it's about.
+        let article = Article::About { scripted: true, md: "A tale".into() };
+        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        assert!(md.contains("> [!NOTE] This page shows its text with JavaScript"), "{md}");
+        assert!(md.contains("Press `w` to open the website") && md.contains("\n\nA tale"), "{md}");
     }
 
     #[test]
