@@ -163,7 +163,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
 /// lost. tmux passes on neither the question nor pictures, unless set up
 /// to, so there it's half blocks without asking.
 fn picker() -> Option<Picker> {
-    use ratatui_image::picker::ProtocolType;
+    use ratatui_image::picker::{Capability, ProtocolType};
     use ratatui_image::picker::cap_parser::QueryStdioOptions;
     if std::env::var_os("TMUX").is_some() {
         return Some(Picker::halfblocks());
@@ -188,9 +188,11 @@ fn picker() -> Option<Picker> {
         None => std::env::var("LC_TERMINAL").is_ok_and(|v| v.contains("iTerm")),
     };
     if iterm {
-        // iTerm2 says it can do Sixel too, and that's what gets picked, but
-        // its own pictures are what it draws best.
-        picker.set_protocol_type(ProtocolType::Iterm2);
+        // iTerm2 says it can do Sixel too, and that's what gets picked. Newer
+        // ones draw Kitty's, sent once and then only placed, so they move
+        // with the text; in older ones, its own are what it draws best.
+        let kitty = picker.capabilities().contains(&Capability::Kitty);
+        picker.set_protocol_type(if kitty { ProtocolType::Kitty } else { ProtocolType::Iterm2 });
     } else if picker.protocol_type() == ProtocolType::Iterm2
         && program.is_some_and(|p| !ITERM_LIKE.iter().any(|t| p.contains(t)))
     {
@@ -338,11 +340,13 @@ struct App {
     /// The story's pictures made ready to draw, by story, picture, columns
     /// and rows.
     drawn: HashMap<(u64, usize, usize, usize), crate::figure::Drawn>,
+    /// Pictures to send the terminal, or free, after this frame.
+    to_send: Vec<String>,
     /// Where the pictures were last put (story, how far it's scrolled),
     /// and when they moved.
     figure_at: Option<(u64, usize)>,
     figure_moved: Option<Instant>,
-    /// Moving fast: iTerm2's pictures are soft till it stops.
+    /// Moving fast: an older iTerm2's pictures are soft till it stops.
     figure_moving: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
@@ -462,6 +466,7 @@ impl App {
             folded: HashSet::new(),
             picker: None,
             drawn: HashMap::new(),
+            to_send: Vec::new(),
             figure_at: None,
             figure_moved: None,
             figure_moving: false,
@@ -580,7 +585,13 @@ impl App {
             terminal.swap_buffers();
             terminal.draw(|f| self.draw(f))?;
         }
-        execute!(io::stdout(), EndSynchronizedUpdate)?;
+        // Kitty's pictures, sent once whatever is drawn over them: shown
+        // with the rest when the update ends.
+        let mut out = io::stdout();
+        for send in self.to_send.drain(..) {
+            io::Write::write_all(&mut out, send.as_bytes())?;
+        }
+        execute!(out, EndSynchronizedUpdate)?;
         Ok(())
     }
 
@@ -595,7 +606,8 @@ impl App {
         set_mouse(self.mouse_on, true);
         set_paste(true);
         terminal.clear()?;
-        self.drawn.clear();
+        let forgotten = self.drawn.drain().filter_map(|(_, drawn)| drawn.forget());
+        self.to_send.extend(forgotten);
         Ok(result)
     }
 
@@ -1888,11 +1900,11 @@ impl App {
             self.figure_moving = false;
             return;
         };
-        // iTerm2's pictures are sent again whenever they move, a lot for it
-        // to keep up with at a key's repeat rate: moving again soon after
-        // the last move, they're shown with less detail till things settle.
-        // Other terminals keep up (Kitty's are sent once, and only placed
-        // after), so theirs move as they are.
+        // An iTerm2 without Kitty's pictures has its own sent again whenever
+        // they move, a lot for it to keep up with at a key's repeat rate:
+        // moving again soon after the last move, they're shown with less
+        // detail till things settle. Other terminals keep up (Kitty's are
+        // sent once, and only placed after), so theirs move as they are.
         let now = Instant::now();
         let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
         if self.figure_at != Some((id, top)) {
@@ -1904,13 +1916,21 @@ impl App {
         }
         let Some(picker) = &self.picker else { return };
         // Only this story's are kept ready.
-        self.drawn.retain(|(story, ..), _| *story == id);
+        let to_send = &mut self.to_send;
+        self.drawn.retain(|(story, ..), drawn| {
+            let keep = *story == id;
+            if !keep {
+                to_send.extend(drawn.forget());
+            }
+            keep
+        });
         for (figure, y) in figures {
             let key = (id, figure.index, figure.cols, figure.rows);
             if !self.drawn.contains_key(&key)
                 && let Some(picture) = self.figures.get(&(id, figure.index))
-                && let Some(drawn) = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
+                && let Some(mut drawn) = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
             {
+                self.to_send.extend(drawn.take_send());
                 self.drawn.insert(key, drawn);
             }
             let Some(drawn) = self.drawn.get(&key) else { continue };
