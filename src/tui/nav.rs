@@ -40,11 +40,8 @@ pub enum Prompt {
         purpose: super::act::Passphrase,
     },
     Logout { user: String },
-    /// A reply, written, to post or not.
-    Post {
-        draft: super::act::Draft,
-        text: String,
-    },
+    /// A reply being written, in its box.
+    Compose(Box<super::act::Compose>),
     /// Confirming opening something outside lshn.
     Open(crate::open::Target),
     /// What to copy.
@@ -241,7 +238,7 @@ impl App {
             | Prompt::LoginPassword { .. }
             | Prompt::Passphrase { .. }
             | Prompt::Logout { .. }
-            | Prompt::Post { .. }) => self.act_prompt_key(p, key, ctrl),
+            | Prompt::Compose(_)) => self.act_prompt_key(p, key, ctrl),
             Prompt::Open(target) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.flash = Some(match crate::open::open(&target) {
@@ -509,7 +506,7 @@ impl App {
             | Prompt::LoginPassword { .. }
             | Prompt::Passphrase { .. }
             | Prompt::Logout { .. }
-            | Prompt::Post { .. } => return None,
+            | Prompt::Compose(_) => return None,
             Prompt::SearchHn { query } => Line::from(vec![
                 " Search HN: ".bold(),
                 Span::raw(query.clone()),

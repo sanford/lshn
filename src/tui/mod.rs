@@ -2,6 +2,7 @@
 //! right (title, article, then comments), and the story full screen.
 
 mod act;
+mod compose;
 mod copy;
 mod menu;
 mod mouse;
@@ -22,7 +23,7 @@ use crate::{safe, wrap};
 use image::DynamicImage;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -142,6 +143,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     // whole screen afresh over them.
     terminal.clear()?;
     set_mouse(app.mouse_on, true);
+    set_paste(true);
     if app.mouse_on {
         // ratatui's panic hook restores the terminal, but doesn't know
         // about the mouse: turn it off first, or the shell gets mouse codes.
@@ -153,6 +155,7 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     }
     let result = app.run(&mut terminal);
     set_mouse(app.mouse_on, false);
+    set_paste(false);
     ratatui::restore();
     result
 }
@@ -231,6 +234,18 @@ fn stop() {
     unsafe {
         libc::raise(libc::SIGTSTP);
     }
+}
+
+/// Asks the terminal to send what's pasted as one piece (bracketed paste),
+/// rather than as keys, or not.
+fn set_paste(on: bool) {
+    use ratatui::crossterm::event::{DisableBracketedPaste, EnableBracketedPaste};
+    use ratatui::crossterm::execute;
+    let _ = if on {
+        execute!(io::stdout(), EnableBracketedPaste)
+    } else {
+        execute!(io::stdout(), DisableBracketedPaste)
+    };
 }
 
 /// Turns mouse reporting on or off, if lshn uses the mouse.
@@ -350,10 +365,8 @@ struct App {
     auth: act::Auth,
     /// What's waiting for you to log in.
     pending: Option<act::Action>,
-    /// A reply form asked for: what's being replied to, and the story.
-    replying: Option<(u64, Option<u64>)>,
     /// A reply to write in the editor, once the key's handled.
-    editing: Option<act::Draft>,
+    editing: Option<Box<act::Compose>>,
     /// The draft of a reply being posted, to delete once it is.
     posting: Option<std::path::PathBuf>,
     /// The stories you've read, and how much of each thread you'd seen.
@@ -468,7 +481,6 @@ impl App {
             opening_at: None,
             auth: act::Auth::Unknown,
             pending: None,
-            replying: None,
             editing: None,
             posting: None,
             seen,
@@ -534,9 +546,14 @@ impl App {
                         return Ok(());
                     }
                     Event::Mouse(m) => {
-                        self.flash = None;
+                        // A press or the wheel, not the button coming up
+                        // after a click, which would clear what it said.
+                        if !matches!(m.kind, MouseEventKind::Up(_) | MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                            self.flash = None;
+                        }
                         self.mouse(m);
                     }
+                    Event::Paste(text) => self.paste(&text),
                     _ => {} // Resizes redraw at the top of the loop.
                 }
                 if self.editing.is_some() || self.suspend || !event::poll(Duration::ZERO)? {
@@ -578,10 +595,12 @@ impl App {
     /// again. Its pictures are gone with the screen: they're sent again.
     fn hand_over<T>(&mut self, terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
         set_mouse(self.mouse_on, false);
+        set_paste(false);
         ratatui::restore();
         let result = f();
         *terminal = ratatui::init();
         set_mouse(self.mouse_on, true);
+        set_paste(true);
         terminal.clear()?;
         self.drawn.clear();
         Ok(result)
@@ -1288,6 +1307,33 @@ impl App {
         story::replies_markdown(me, self.replies.as_ref(), self.replies_mark, now())
     }
 
+    /// What's pasted: into the reply box as it is; where something's being
+    /// typed on one line (a search, the filter, the login), as if typed;
+    /// anywhere else, nowhere, so it can't act as keys.
+    fn paste(&mut self, text: &str) {
+        if let Some(nav::Prompt::Compose(c)) = &mut self.prompt {
+            c.text.paste(text);
+            return;
+        }
+        let typing = self.typing
+            || matches!(
+                self.prompt,
+                Some(
+                    nav::Prompt::Search { .. }
+                        | nav::Prompt::SearchHn { .. }
+                        | nav::Prompt::LoginUser { .. }
+                        | nav::Prompt::LoginPassword { .. }
+                        | nav::Prompt::Passphrase { .. }
+                )
+            );
+        if !typing {
+            return;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
     /// The story `S` and `x` act on: the one being read, or in the list,
     /// the selected one.
     fn story_here(&self) -> Option<u64> {
@@ -1379,6 +1425,10 @@ impl App {
         let key = emacs(key);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         if ctrl && key.code == KeyCode::Char('c') {
+            // A reply being written is kept, not lost.
+            if let Some(nav::Prompt::Compose(c)) = self.prompt.take() {
+                self.keep_reply(&c);
+            }
             return true;
         }
         if ctrl && key.code == KeyCode::Char('z') && cfg!(unix) {
@@ -1630,7 +1680,7 @@ impl App {
         self.draw_header(f, header);
         self.draw_footer(f, footer);
         self.draw_picker(f);
-        self.draw_post(f);
+        self.draw_compose(f);
         if let Some(nav::Prompt::Menu(menu)) = &mut self.prompt {
             menu.draw(f);
         }
@@ -2248,7 +2298,7 @@ fn draw_help(f: &mut Frame) {
             "Yours",
             &[
                 ("v", "Upvote the selected comment, or above the comments, the story; again, unvote"),
-                ("r", "Reply to the selected comment, or above the comments, the story"),
+                ("r", "Reply to the selected comment, or above the comments, the story (in a box)"),
                 ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
                 ("S", "Save the story to read later, or no longer"),
                 ("x X", "Hide the story from the lists, or bring it back / show the hidden"),

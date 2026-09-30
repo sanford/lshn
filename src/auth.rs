@@ -318,7 +318,7 @@ pub const CUT: &str = "# ------------------------ >8 ------------------------";
 /// it's replying to, quoted.
 pub fn draft(replying_to: &str, quoted: &str) -> String {
     let mut out = format!(
-        "\n\n{CUT}\n# Write your reply above the line; everything from the line down is left out.\n# Save and quit to see it before it's posted. Leave it empty not to post.\n#\n# HN formats: a blank line between paragraphs, *italics*, and lines\n# starting with two spaces as code. Links are made from URLs.\n#\n# Replying to {replying_to}:\n#\n"
+        "\n\n{CUT}\n# Write your reply above the line; everything from the line down is left out.\n# Save and quit to go back to the reply box, to post it or not.\n#\n# HN formats: a blank line between paragraphs, *italics*, and lines\n# starting with two spaces as code. Links are made from URLs.\n#\n# Replying to {replying_to}:\n#\n"
     );
     for line in quoted.lines() {
         out.push_str(&format!("# > {line}\n"));

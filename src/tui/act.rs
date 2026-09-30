@@ -3,6 +3,7 @@
 //! keyring isn't asked for it until then; without one, it's asked for, and
 //! what was being done carries on once it's there.
 
+use super::compose::TextBox;
 use super::nav::{Prompt, Purpose};
 use super::{App, Asked, Focus};
 use crate::auth::{self, Form, Session};
@@ -11,9 +12,9 @@ use crate::session::{self, Saved};
 use crate::{editor, hn, story, store};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
-use ratatui::style::Stylize;
+use ratatui::style::{Color, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Padding};
 use ratatui::{DefaultTerminal, Frame};
 use std::path::PathBuf;
 
@@ -34,17 +35,47 @@ pub enum Action {
     Reply(u64),
 }
 
-/// A reply being written: what it's to, and where the draft is kept (until
-/// it's posted, so nothing's lost if posting fails).
-#[derive(Clone)]
-pub struct Draft {
-    pub form: Form,
+/// A reply being written, in the box: what it's to, HN's form to post it
+/// with once that's here, and where the draft's kept till it's posted, so
+/// nothing's lost if posting fails.
+pub struct Compose {
+    pub target: u64,
     /// The story it'll show up on.
     pub story: u64,
     /// Who it's replying to, and what they said.
     pub who: String,
     pub quoted: String,
+    pub form: Option<Result<Form, String>>,
+    /// Ctrl-S before the form's here: post once it is.
+    pub waiting: bool,
+    /// What's happening, or went wrong, in place of the keys' hints.
+    pub status: Option<String>,
+    pub text: TextBox,
+    /// Where the keys go: the text, or a button.
+    pub on: On,
     pub path: PathBuf,
+    /// Where the text and the buttons were drawn, for the mouse.
+    pub text_at: Rect,
+    pub cancel_at: Rect,
+    pub post_at: Rect,
+}
+
+/// What has the keyboard in the reply box; Tab goes round them.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum On {
+    Text,
+    Cancel,
+    Post,
+}
+
+impl On {
+    fn next(self, forward: bool) -> On {
+        match (self, forward) {
+            (On::Text, true) | (On::Post, false) => On::Cancel,
+            (On::Cancel, true) | (On::Text, false) => On::Post,
+            (On::Post, true) | (On::Cancel, false) => On::Text,
+        }
+    }
 }
 
 /// What a passphrase is for.
@@ -163,9 +194,35 @@ impl App {
                 self.send(Job::Upvote(session, id), true);
             }
             Action::Reply(id) => {
-                self.flash = Some("Getting the reply form…".into());
+                // The box opens at once; HN's form comes meanwhile.
                 let is_story = self.stories.contains_key(&id);
-                self.replying = Some((id, self.story_on_screen()));
+                let (who, quoted) = self.said(id);
+                let dir = store::dir().unwrap_or_else(std::env::temp_dir);
+                let path = dir.join("drafts").join(format!("reply-{id}.txt"));
+                let kept = std::fs::read_to_string(&path).map(|t| auth::reply_text(&t)).unwrap_or_default();
+                let story = self.story_on_screen().unwrap_or(id);
+                // What's being answered stays in view above the box.
+                if let Some(doc) = self.current()
+                    && doc.focused().is_some_and(|c| c.id == id)
+                {
+                    doc.go_to_comment(id);
+                }
+                self.flash = None;
+                self.prompt = Some(Prompt::Compose(Box::new(Compose {
+                    target: id,
+                    story,
+                    who,
+                    quoted,
+                    form: None,
+                    waiting: false,
+                    status: None,
+                    text: TextBox::new(&kept),
+                    on: On::Text,
+                    path,
+                    text_at: Rect::default(),
+                    cancel_at: Rect::default(),
+                    post_at: Rect::default(),
+                })));
                 self.send(Job::ReplyForm(session, id, is_story), true);
             }
         }
@@ -235,25 +292,7 @@ impl App {
                     self.flash = Some(format!("Logged out {user}"));
                 }
             }
-            Prompt::Post { draft, text } => match key.code {
-                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
-                    let Auth::In(session) = &self.auth else {
-                        return;
-                    };
-                    self.flash = Some("Posting…".into());
-                    self.posting = Some(draft.path.clone());
-                    let job = Job::Post(session.clone(), draft.form, text, draft.story);
-                    self.send(job, true);
-                }
-                KeyCode::Char('e' | 'E') => self.editing = Some(draft),
-                KeyCode::Esc | KeyCode::Char('n' | 'N' | 'q') => {
-                    self.flash = Some(format!(
-                        "Not posted. The draft's kept in {}",
-                        super::display_path(&draft.path)
-                    ));
-                }
-                _ => self.prompt = Some(Prompt::Post { draft, text }),
-            },
+            Prompt::Compose(c) => self.compose_key(c, key, ctrl),
             _ => {}
         }
     }
@@ -331,28 +370,116 @@ impl App {
         });
     }
 
-    /// With the form to reply with: to the editor.
-    pub(super) fn got_reply_form(&mut self, id: u64, result: Result<Form, String>) {
-        let Some((target, story)) = self.replying.take().filter(|(t, _)| *t == id) else {
-            return;
-        };
-        let form = match result {
-            Ok(form) => form,
-            Err(e) => {
-                self.flash = Some(format!("Can't reply: {e}"));
+    /// Keys in the reply box: Tab goes round the text and the Cancel and
+    /// Post buttons; Esc and Ctrl-S are Cancel and Post from anywhere, and
+    /// Ctrl-O goes to the editor. In the text, the rest write.
+    fn compose_key(&mut self, mut c: Box<Compose>, key: KeyEvent, ctrl: bool) {
+        let press = matches!(key.code, KeyCode::Enter | KeyCode::Char(' '));
+        match key.code {
+            KeyCode::Esc => return self.keep_reply(&c),
+            KeyCode::Char('s') if ctrl => return self.post_reply(c),
+            KeyCode::Char('o') if ctrl => {
+                self.editing = Some(c);
                 return;
             }
+            KeyCode::Tab => c.on = c.on.next(true),
+            KeyCode::BackTab => c.on = c.on.next(false),
+            _ if c.on == On::Text => {
+                c.text.key(key);
+            }
+            _ if press && c.on == On::Cancel => return self.keep_reply(&c),
+            _ if press && c.on == On::Post => return self.post_reply(c),
+            KeyCode::Left | KeyCode::Right => {
+                c.on = if c.on == On::Cancel { On::Post } else { On::Cancel };
+            }
+            _ => {}
+        }
+        self.prompt = Some(Prompt::Compose(c));
+    }
+
+    /// A click in the reply box: a button's pressed, or the text gets the
+    /// keyboard back. Returns whether the box took it: while it's open,
+    /// clicks elsewhere do nothing, so none follows a link by mistake.
+    pub(super) fn compose_click(&mut self, x: u16, y: u16) -> bool {
+        let Some(Prompt::Compose(c)) = &mut self.prompt else {
+            return false;
         };
-        let (who, quoted) = self.said(target);
-        let dir = store::dir().unwrap_or_else(std::env::temp_dir);
-        self.flash = None;
-        self.editing = Some(Draft {
-            form,
-            story: story.unwrap_or(target),
-            who,
-            quoted,
-            path: dir.join("drafts").join(format!("reply-{target}.txt")),
+        let at = ratatui::layout::Position { x, y };
+        if c.text_at.contains(at) {
+            c.on = On::Text;
+        } else if c.cancel_at.contains(at) {
+            if let Some(Prompt::Compose(c)) = self.prompt.take() {
+                self.keep_reply(&c);
+            }
+        } else if c.post_at.contains(at)
+            && let Some(Prompt::Compose(c)) = self.prompt.take()
+        {
+            self.post_reply(c);
+        }
+        true
+    }
+
+    /// Closes the box, keeping what's written (if anything) for `r` to
+    /// carry on with.
+    pub(super) fn keep_reply(&mut self, c: &Compose) {
+        if c.text.is_empty() {
+            let _ = std::fs::remove_file(&c.path);
+            return;
+        }
+        self.flash = Some(match save_draft(&c.path, &c.text.text()) {
+            Ok(()) => format!("Kept for later: r on {}'s again carries on", c.who),
+            Err(e) => format!("Couldn't keep the draft: {e}"),
         });
+    }
+
+    /// Posts what's written, once HN's form is here; it's kept meanwhile,
+    /// and if posting fails.
+    fn post_reply(&mut self, mut c: Box<Compose>) {
+        if c.text.is_empty() {
+            c.status = Some("Nothing to post yet".into());
+            self.prompt = Some(Prompt::Compose(c));
+            return;
+        }
+        let _ = save_draft(&c.path, &c.text.text());
+        let (Some(Ok(form)), Auth::In(session)) = (&c.form, &self.auth) else {
+            if let (Some(Err(_)), Auth::In(session)) = (&c.form, &self.auth) {
+                // It failed before: ask again.
+                let is_story = self.stories.contains_key(&c.target);
+                self.send(Job::ReplyForm(session.clone(), c.target, is_story), true);
+                c.form = None;
+            }
+            c.waiting = true;
+            c.status = Some("Posting as soon as HN's reply form is here…".into());
+            self.prompt = Some(Prompt::Compose(c));
+            return;
+        };
+        let job = Job::Post(session.clone(), form.clone(), c.text.text().trim().to_string(), c.story);
+        self.posting = Some(c.path.clone());
+        self.flash = Some("Posting…".into());
+        self.send(job, true);
+    }
+
+    /// HN's form for a reply: kept with the box it's for, open or in the
+    /// editor, and used at once if Ctrl-S was waiting for it.
+    pub(super) fn got_reply_form(&mut self, id: u64, result: Result<Form, String>) {
+        let c = match (&mut self.prompt, &mut self.editing) {
+            (Some(Prompt::Compose(c)), _) | (_, Some(c)) if c.target == id => c,
+            _ => return,
+        };
+        let failed = result.as_ref().err().map(|e| format!("Can't reply: {e}"));
+        c.form = Some(result);
+        if !c.waiting {
+            // Said now, but not in the way of writing.
+            c.status = failed;
+            return;
+        }
+        c.waiting = false;
+        c.status = failed;
+        if c.status.is_none()
+            && let Some(Prompt::Compose(c)) = self.prompt.take()
+        {
+            self.post_reply(c);
+        }
     }
 
     /// Who wrote item `id`, and what they said: a story's title, or a
@@ -390,67 +517,86 @@ impl App {
         }
     }
 
-    /// Writes the reply in the editor, then asks before posting it. A draft
-    /// kept from before carries on where it was.
-    pub(super) fn edit_reply(&mut self, terminal: &mut DefaultTerminal, draft: Draft) -> std::io::Result<()> {
-        let text = std::fs::read_to_string(&draft.path)
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| auth::draft(&draft.who, &draft.quoted));
-        if let Some(dir) = draft.path.parent() {
-            std::fs::create_dir_all(dir)?;
+    /// Hands the reply to the editor, with what it's replying to below a
+    /// line, and back to the box with what was written.
+    pub(super) fn edit_reply(&mut self, terminal: &mut DefaultTerminal, mut c: Box<Compose>) -> std::io::Result<()> {
+        let text = format!("{}{}", c.text.text(), auth::draft(&c.who, &c.quoted));
+        let written = save_draft(&c.path, &text);
+        let result = match written {
+            Ok(()) => self.hand_over(terminal, || editor::edit(&c.path, 1))?,
+            Err(e) => Err(e),
+        };
+        match result {
+            Ok(()) => {
+                let text = auth::reply_text(&std::fs::read_to_string(&c.path).unwrap_or_default());
+                c.text = TextBox::new(&text);
+            }
+            Err(e) => c.status = Some(format!("Couldn't edit: {e}")),
         }
-        std::fs::write(&draft.path, text)?;
-        // Hand the terminal to the editor until it's done.
-        let result = self.hand_over(terminal, || editor::edit(&draft.path, 1))?;
-        if let Err(e) = result {
-            self.flash = Some(format!("Couldn't edit: {e}"));
-            return Ok(());
-        }
-        let reply = auth::reply_text(&std::fs::read_to_string(&draft.path).unwrap_or_default());
-        if reply.is_empty() {
-            let _ = std::fs::remove_file(&draft.path);
-            self.flash = Some("Not posted: the reply was empty".into());
-        } else {
-            self.prompt = Some(Prompt::Post { draft, text: reply });
-        }
+        self.prompt = Some(Prompt::Compose(c));
         Ok(())
     }
 
-    /// The reply, before it's posted, and what it's replying to.
-    pub(super) fn draw_post(&self, f: &mut Frame) {
-        let Some(Prompt::Post { draft, text }) = &self.prompt else {
+    /// The reply box, over the bottom of the screen, so what it answers
+    /// stays in view above it.
+    pub(super) fn draw_compose(&mut self, f: &mut Frame) {
+        let frame = self.theme.frame;
+        let Some(Prompt::Compose(c)) = &mut self.prompt else {
             return;
         };
         let area = f.area();
-        let width = area.width.saturating_sub(8).min(90);
-        let mut lines = vec![
-            Line::from(format!("Replying to {}:", draft.who)).dim(),
-            Line::from(format!("> {}", first_line(&draft.quoted))).dim(),
-            Line::default(),
-        ];
-        lines.extend(text.lines().map(|l| Line::from(crate::safe::printable(l).into_owned())));
-        let inner_w = usize::from(width.saturating_sub(4)).max(1);
-        let rows: usize = lines
-            .iter()
-            .map(|l| l.width().div_ceil(inner_w).max(1))
-            .sum();
-        let height = (rows as u16 + 2).min(area.height.saturating_sub(2));
+        let height = (area.height * 2 / 5).clamp(7, 18).min(area.height.saturating_sub(2));
         let rect = Rect {
-            x: area.x + (area.width - width) / 2,
-            y: area.y + (area.height - height) / 2,
-            width,
+            x: area.x + 1,
+            // Above the footer.
+            y: area.bottom().saturating_sub(height + 1),
+            width: area.width.saturating_sub(2),
             height,
         };
+        // The keys are in the footer; here, just what's happening.
+        let hints = match &c.status {
+            Some(status) => Line::from(format!(" {status} ").yellow()),
+            None if c.form.is_none() => Line::from(" getting HN's reply form… ".dim()),
+            None => Line::default(),
+        };
+        let border = frame.map_or(Style::new(), |c| Style::new().fg(c));
+        let block = Block::bordered()
+            .border_style(border)
+            .title(format!(" Reply to {} ", crate::safe::printable(&c.who)))
+            .title_bottom(hints)
+            .padding(Padding::horizontal(1));
+        let inner = block.inner(rect);
         f.render_widget(Clear, rect);
-        f.render_widget(
-            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-                Block::bordered()
-                    .title(" Post this reply? ")
-                    .padding(Padding::horizontal(1)),
-            ),
-            rect,
-        );
+        f.render_widget(block, rect);
+        // The text, then a blank line and the buttons, on the right.
+        let text_area = Rect {
+            height: inner.height.saturating_sub(2),
+            ..inner
+        };
+        c.text.draw(f, text_area, c.on == On::Text);
+        c.text_at = text_area;
+        let accent = frame.map_or(Style::new().reversed(), |c| Style::new().fg(Color::Black).bg(c));
+        let button = |label: &str, on: bool| {
+            let span = Span::raw(format!(" {label} "));
+            if on { span.style(accent.bold()) } else { span.style(Style::new().bold().reversed()) }
+        };
+        let buttons = Line::from(vec![
+            button("Cancel", c.on == On::Cancel),
+            Span::raw("  "),
+            button("Post", c.on == On::Post),
+        ])
+        .right_aligned();
+        let row = Rect {
+            y: inner.bottom().saturating_sub(1),
+            height: 1,
+            ..inner
+        };
+        // Where each landed, on the right: " Cancel ", two spaces, " Post ".
+        let (cancel_w, post_w) = (8, 6);
+        let post_x = row.right().saturating_sub(post_w);
+        c.post_at = Rect::new(post_x, row.y, post_w, 1);
+        c.cancel_at = Rect::new(post_x.saturating_sub(2 + cancel_w), row.y, cancel_w, 1);
+        f.render_widget(buttons, row);
     }
 
     /// The footer for these prompts.
@@ -483,18 +629,29 @@ impl App {
                 "y".bold(),
                 " logs out; any other key keeps you logged in".dim(),
             ]),
-            Prompt::Post { .. } => Line::from(vec![
-                " y".bold(),
+            Prompt::Compose(c) => Line::from(vec![
+                format!(" Replying to {}: ", crate::safe::printable(&c.who)).bold(),
+                "tab".bold(),
+                " to the buttons  ".dim(),
+                "ctrl-s".bold(),
                 " post  ".dim(),
-                "e".bold(),
-                " edit  ".dim(),
-                "n".bold(),
-                " not now (the draft's kept)".dim(),
+                "esc".bold(),
+                " cancel (it's kept for later)  ".dim(),
+                "ctrl-o".bold(),
+                " editor".dim(),
             ]),
             _ => return None,
         };
         Some(line)
     }
+}
+
+/// Writes `text` to the draft at `path`.
+fn save_draft(path: &std::path::Path, text: &str) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, text)
 }
 
 /// Typing into a prompt's text.
@@ -514,15 +671,6 @@ pub(super) fn find(comments: &[hn::Comment], id: u64) -> Option<&hn::Comment> {
     comments
         .iter()
         .find_map(|c| if c.id == id { Some(c) } else { find(&c.replies, id) })
-}
-
-fn first_line(text: &str) -> String {
-    let line = text.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-    let mut out: String = line.chars().take(80).collect();
-    if line.chars().count() > 80 {
-        out.push('…');
-    }
-    out
 }
 
 #[cfg(test)]
@@ -570,34 +718,63 @@ mod tests {
     }
 
     #[test]
-    fn a_written_reply_is_posted_edited_or_kept() {
+    fn the_reply_box_writes_goes_round_its_buttons_and_keeps_drafts() {
         let mut app = app();
-        let draft = Draft {
-            form: Form {
-                parent: "1".into(),
-                goto: "item?id=1".into(),
-                hmac: "x".into(),
-            },
-            story: 1,
-            who: "bob".into(),
-            quoted: "hi".into(),
-            path: std::env::temp_dir().join("lshn-test-draft.txt"),
+        let path = std::env::temp_dir().join(format!("lshn-test-draft-{}.txt", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let open = |app: &mut App, text: &str| {
+            app.prompt = Some(Prompt::Compose(Box::new(Compose {
+                target: 7,
+                story: 1,
+                who: "bob".into(),
+                quoted: "hi".into(),
+                form: None,
+                waiting: false,
+                status: None,
+                text: TextBox::new(text),
+                on: On::Text,
+                path: path.clone(),
+                text_at: Rect::default(),
+                cancel_at: Rect::default(),
+                post_at: Rect::default(),
+            })));
         };
-        let post = |draft: &Draft| Prompt::Post {
-            draft: draft.clone(),
-            text: "My reply".into(),
+        let key = |code| KeyEvent::new(code, KeyModifiers::NONE);
+        let compose = |app: &App| match &app.prompt {
+            Some(Prompt::Compose(c)) => (c.text.text(), c.on, c.waiting),
+            _ => panic!("the box closed"),
         };
-        app.prompt = Some(post(&draft));
-        app.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE));
-        assert!(app.editing.is_some() && app.prompt.is_none());
-        app.editing = None;
-        app.prompt = Some(post(&draft));
-        app.key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE));
-        assert!(app.flash.as_deref().unwrap().contains("draft's kept"));
-        // Other keys leave it up.
-        app.prompt = Some(post(&draft));
-        app.key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE));
-        assert!(matches!(app.prompt, Some(Prompt::Post { .. })));
+        open(&mut app, "");
+        for c in "Hi q".chars() {
+            app.key(key(KeyCode::Char(c)));
+        }
+        app.key(key(KeyCode::Enter));
+        assert_eq!(compose(&app).0, "Hi q\n", "q and Enter write, in the box");
+        // Tab: Cancel, Post, back to the text.
+        app.key(key(KeyCode::Tab));
+        assert_eq!(compose(&app).1, On::Cancel);
+        app.key(key(KeyCode::Right));
+        assert_eq!(compose(&app).1, On::Post);
+        app.key(key(KeyCode::Char('x')));
+        assert_eq!(compose(&app).0, "Hi q\n", "on a button, typing doesn't write");
+        app.key(key(KeyCode::Tab));
+        assert_eq!(compose(&app).1, On::Text);
+        // Cancel keeps it for later.
+        app.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT));
+        app.key(key(KeyCode::BackTab));
+        assert_eq!(compose(&app).1, On::Cancel);
+        app.key(key(KeyCode::Enter));
+        assert!(app.prompt.is_none());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "Hi q\n");
+        // Posting before HN's form is here: it waits for it.
+        open(&mut app, "Hi");
+        app.auth = Auth::In(Session { cookie: "bob&x".into() });
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(compose(&app).2, "waiting for the form");
+        // An empty box leaves no draft behind.
+        open(&mut app, "  ");
+        app.key(key(KeyCode::Esc));
+        assert!(!path.exists());
     }
 
     #[test]

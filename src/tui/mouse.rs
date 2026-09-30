@@ -34,6 +34,15 @@ impl App {
             }
             return;
         }
+        // The reply box takes clicks; the wheel still scrolls what's behind.
+        if m.kind == MouseEventKind::Down(MouseButton::Left) && self.compose_click(x, y) {
+            return;
+        }
+        if matches!(self.prompt, Some(Prompt::Compose(_)))
+            && matches!(m.kind, MouseEventKind::Drag(_) | MouseEventKind::Up(_))
+        {
+            return;
+        }
         // A popup takes the wheel for its list; clicks outside close it.
         if let Some(Prompt::Pick(picker)) = &mut self.prompt {
             if let Some(down) = down {
