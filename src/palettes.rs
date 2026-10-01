@@ -1,6 +1,6 @@
 //! Omarchy's themes, bundled so they can be picked anywhere. Each is the
 //! theme's `colors.toml`, as Omarchy ships it (MIT: see `themes/LICENSE`);
-//! and lshn's own, `hn` and `amber`, in the same form.
+//! and lshn's own, `hn`, `amber` and `green`, in the same form.
 //!
 //! Themes of your own go in `~/.lshn/themes/`, in the same format: as
 //! `NAME.toml`, or as a folder `NAME/` with a `colors.toml` in it, like an
@@ -25,6 +25,7 @@ themes!(
     "ethereal",
     "everforest",
     "flexoki-light",
+    "green",
     "gruvbox",
     "hackerman",
     "hn",
@@ -48,8 +49,8 @@ themes!(
 /// The theme lshn starts with, unless another's chosen.
 pub const DEFAULT: &str = "hn";
 
-/// lshn's own themes: HN's orange, and the same in amber.
-const OWN: &[&str] = &[DEFAULT, "amber"];
+/// lshn's own themes: HN's orange, and the same in amber and in green.
+const OWN: &[&str] = &[DEFAULT, "amber", "green"];
 
 /// Whether a theme paints the whole screen its background, rather than
 /// leaving the terminal's: all but lshn's own, which keep the contrast the

@@ -161,7 +161,7 @@ Everything a story or comment says is treated as text: none of it can become for
 `~/.lshn/config.toml`, all optional:
 
 ```toml
-theme = "tokyo-night"   # hn (the default: HN's orange), amber, auto, dark, light, or one of Omarchy's themes
+theme = "tokyo-night"   # hn (the default: HN's orange), amber, green, auto, dark, light, or one of Omarchy's themes
 width = 100             # wrap text at 100 columns
 feed = "best"           # the list to start with
 mouse = false           # leave the mouse to the terminal
@@ -176,7 +176,7 @@ user = "you"            # whose replies i shows, without logging in
 
 `lshn --edit-config` opens it in your editor, starting one with every setting listed, and says if what you saved can't be read. `--config FILE` reads another file instead.
 
-`amber` is `hn` in amber, and like it, keeps your terminal's background. Here with the copy menu open over the comments:
+`amber` and `green` are `hn` in an old terminal's amber and green, and like it, keep your terminal's background. Here's amber, with the copy menu open over the comments:
 
 ![lshn in the amber theme, with the copy menu open: the story's link, its HN page, a Markdown link, the comment, the comment's link, the article, or a selection](docs/amber.png)
 
