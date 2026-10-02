@@ -101,10 +101,18 @@ impl App {
                 if matches!(self.prompt, Some(Prompt::Select { .. })) {
                     self.prompt = None;
                 }
+                let list = self.focus == Focus::List;
                 let Some(doc) = self.current() else { return false };
                 doc.selection = None;
                 if !doc.contains(x, y) {
                     return false;
+                }
+                // From the list, a click on the story beside it reads it,
+                // as `Tab` would. The story's laid out afresh, so the
+                // click goes no further.
+                if list {
+                    self.switch_view();
+                    return true;
                 }
                 let spot = doc.spot_at(x, y);
                 self.press = Some((spot, false));

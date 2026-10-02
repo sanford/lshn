@@ -118,7 +118,7 @@ Anywhere:
 
 `Home` `End` `PgUp` `PgDn` do what they say. Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
-So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), follows a link, jumps through the scrollbar, or goes to a place in the outline. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
+So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), reads the story shown beside the list, follows a link, jumps through the scrollbar, or goes to a place in the outline. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
 
 ### Following links
 
