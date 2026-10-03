@@ -70,7 +70,7 @@ In the list:
 | `↑` `↓` `j` `k` | Move; with `Shift` (`⇧↑` `⇧↓` `K` `J`), a page at a time |
 | `g` `G` | The first story, the last |
 | `Enter` `→` `l` | Read the story full screen |
-| `Tab` | Go to the story. On a terminal 130 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
+| `Tab` | Go to the story. On a terminal 120 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
 | `C` | Jump the preview to the comments, and back |
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title; `Esc` clears it |
