@@ -43,9 +43,9 @@ const LIST_AHEAD: usize = 40;
 const PREFETCH_BEHIND: usize = 2;
 const PREFETCH_AHEAD: usize = 5;
 /// Terminals at least this wide keep the list on screen when `Tab` goes to
-/// the story: the story beside it still gets about 70 columns of text, a
+/// the story: the story beside it still gets about 65 columns of text, a
 /// better line length for reading than the whole width.
-const WIDE: u16 = 120;
+const WIDE: u16 = 110;
 /// Narrower than this, there's only room for one pane: the list, or the
 /// story.
 const NARROW: u16 = 80;
