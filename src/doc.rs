@@ -14,6 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
+use std::collections::HashSet;
 use std::path::PathBuf;
 
 /// A top-level block: its source lines and the rendered lines it became.
@@ -60,6 +61,12 @@ pub struct Doc {
     /// The comment the cursor's on, by id, so it stays put when the thread
     /// changes; `None` in the article above.
     cursor: Option<u64>,
+    /// The link in the cursor's comment `j` and `k` are on: the comment's
+    /// id, and which of its [`LinkStop`]s. One past the last is after
+    /// them all, come up into it from below with the last off screen.
+    link: Option<(u64, usize)>,
+    /// `Esc` let go of the link, but `j` and `k` go on from it.
+    link_hidden: bool,
     /// Across a re-render, the row on screen the cursor's comment was on.
     cursor_row: Option<usize>,
     /// How the cursor's comment is shown, when it is.
@@ -113,6 +120,8 @@ impl Doc {
             big: Vec::new(),
             comments: Vec::new(),
             cursor: None,
+            link: None,
+            link_hidden: false,
             cursor_row: None,
             focus_style: None,
             search: None,
@@ -265,24 +274,26 @@ impl Doc {
 
     /// Draws the rendered view into `area`, wrapped to `width` (which may be
     /// less than the area's).
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, width: usize, theme: &Theme) {
+    /// Links to the pages in `visited` are dimmed.
+    pub fn draw(&mut self, f: &mut Frame, area: Rect, width: usize, theme: &Theme, visited: &HashSet<String>) {
         self.layout(width.max(1), theme);
         self.height = area.height.into();
         self.top = self.top.min(self.max_top());
         self.place_pending_comment();
         self.follow_view();
-        self.draw_rendered(f, area);
+        self.draw_rendered(f, area, visited);
     }
 
-    fn draw_rendered(&mut self, f: &mut Frame, area: Rect) {
+    fn draw_rendered(&mut self, f: &mut Frame, area: Rect, visited: &HashSet<String>) {
         self.rendered_area = area;
         let width = usize::from(area.width);
+        let link = self.focused_link().map(|s| s.id);
         let visible: Vec<Line> = self.lines[self.top..]
             .iter()
             .take(self.height)
             .enumerate()
             .map(|(i, l)| {
-                let line = self.highlighted(self.top + i, l);
+                let line = self.highlighted(self.top + i, l, link, visited);
                 Line::from(line.spans)
             })
             .collect();
@@ -436,8 +447,9 @@ impl Doc {
         trail.iter().map(|h| h.text.as_str()).collect()
     }
 
-    /// Line `i` with any search matches on it highlighted.
-    fn highlighted(&self, i: usize, line: &RLine) -> RLine {
+    /// Line `i` with any search matches on it highlighted, the link `j`
+    /// and `k` are on (by id) reversed, and links already opened dimmed.
+    fn highlighted(&self, i: usize, line: &RLine, link: Option<u32>, visited: &HashSet<String>) -> RLine {
         let mut line = line.clone();
         if let (Some(style), Some(c)) = (self.focus_style, self.focused())
             && (c.start..c.end).contains(&i)
@@ -449,6 +461,16 @@ impl Doc {
             if let Some(band) = style.band {
                 line.spans = banded(line.spans, c.depth * 2, self.width, band);
             }
+        }
+        for l in &line.links {
+            let style = if Some(l.id) == link && self.focus_style.is_some() {
+                Style::new().add_modifier(Modifier::REVERSED)
+            } else if visited.contains(&self.links[l.id as usize]) {
+                Style::new().add_modifier(Modifier::DIM)
+            } else {
+                continue;
+            };
+            line.spans = wrap::restyle(line.spans, l.start, l.end, style);
         }
         let Some(search) = &self.search else {
             return line;
@@ -688,38 +710,117 @@ impl Doc {
         self.focus_style = style;
     }
 
+    /// The links in comment `c`'s text, in order, one for each page: not
+    /// the ones in its header (the author, the age).
+    fn link_stops(&self, c: &CommentSpan) -> Vec<LinkStop> {
+        let Some(body) = (c.start..c.end).find(|&i| blank(&self.lines[i])) else {
+            return Vec::new();
+        };
+        let mut stops: Vec<LinkStop> = Vec::new();
+        for i in body..c.end {
+            for l in &self.lines[i].links {
+                let url = &self.links[l.id as usize];
+                if let Some(s) = stops.iter_mut().find(|s| s.id == l.id) {
+                    s.last = i;
+                } else if !stops.iter().any(|s| &s.url == url) {
+                    stops.push(LinkStop { id: l.id, first: i, last: i, url: url.clone() });
+                }
+            }
+        }
+        stops
+    }
+
+    /// The link `j` and `k` are on, in the comment the cursor's on.
+    pub fn focused_link(&self) -> Option<LinkStop> {
+        if self.link_hidden {
+            return None;
+        }
+        let c = self.focused()?;
+        let (id, n) = self.link?;
+        (id == c.id).then(|| self.link_stops(&c).into_iter().nth(n))?
+    }
+
+    /// Back from a link to the comment it's in, `j` and `k` going on from
+    /// where it was. Returns false if no link was chosen.
+    pub fn clear_link(&mut self) -> bool {
+        let had = self.focused_link().is_some();
+        self.link_hidden = true;
+        had
+    }
+
     /// `j` or `k`: in the article, a line; among the comments, the next or
-    /// previous one, scrolling only as far as it takes to show it whole.
-    /// One taller than the screen is scrolled through first. Scrolling
-    /// goes `lines` at a time.
+    /// previous one, or in one with links, each of its links in turn
+    /// instead, scrolling only as far as it takes to show it whole. One taller than
+    /// the screen is scrolled through first. Scrolling goes `lines` at a
+    /// time.
     pub fn step(&mut self, forward: bool, lines: usize) {
         let by = lines.max(1) as isize;
         let bottom = self.top + self.height;
+        self.link_hidden = false;
         let Some(i) = self.cursor_index() else {
             // The first comment on screen takes the cursor.
             let first = self.comments.iter().position(|c| c.start >= self.top && c.start < bottom);
             match first {
-                Some(i) if forward => self.move_cursor(i, true),
+                Some(i) if forward => self.enter(i, false),
                 _ => self.scroll_by(if forward { by } else { -by }),
             }
             return;
         };
         let c = self.comments[i];
+        let stops = self.link_stops(&c);
+        let at = self.link.filter(|l| l.0 == c.id).map(|l| l.1.min(stops.len()));
         if forward {
+            // The next link not scrolled past, once it's all on screen.
+            let next = (at.map_or(0, |n| n + 1)..stops.len()).find(|&n| stops[n].first >= self.top);
+            if let Some(n) = next {
+                if stops[n].last < bottom {
+                    self.link = Some((c.id, n));
+                } else {
+                    self.scroll_by(by);
+                }
+                return;
+            }
             if c.end > bottom || i + 1 == self.comments.len() {
                 self.scroll_by(by);
             } else {
-                self.move_cursor(i + 1, true);
+                self.enter(i + 1, false);
             }
-        } else if c.start < self.top {
+            return;
+        }
+        if let Some(at) = at {
+            // The link before, once it's on screen; before the first, on
+            // as from the comment.
+            match (0..at).rev().find(|&n| stops[n].last < bottom) {
+                Some(n) if stops[n].first >= self.top => return self.link = Some((c.id, n)),
+                Some(_) => return self.scroll_by(-by),
+                None => self.link = None,
+            }
+        }
+        if c.start < self.top {
             self.scroll_by(-by);
         } else if i == 0 {
             // Back up into the article.
             self.cursor = None;
             self.scroll_by(-by);
         } else {
-            self.move_cursor(i - 1, false);
+            self.enter(i - 1, true);
         }
+    }
+
+    /// Puts the cursor on comment `i` and onto its first link, or coming up
+    /// from below, its last, if it shows. Coming up, if the last is above
+    /// the screen, after it, for `k` to scroll up to it.
+    fn enter(&mut self, i: usize, from_below: bool) {
+        self.move_cursor(i, !from_below);
+        let c = self.comments[i];
+        let stops = self.link_stops(&c);
+        let bottom = self.top + self.height;
+        let shows = |s: &LinkStop| s.first >= self.top && s.last < bottom;
+        self.link = match (from_below, stops.first(), stops.last()) {
+            (false, Some(first), _) if shows(first) => Some((c.id, 0)),
+            (true, _, Some(last)) => Some((c.id, stops.len() - usize::from(last.first >= self.top))),
+            _ => None,
+        };
     }
 
     /// Puts the cursor on comment `i`, scrolling as little as shows it: all
@@ -728,6 +829,8 @@ impl Doc {
         const ABOVE: usize = 1;
         const BELOW: usize = 2;
         self.cursor = Some(self.comments[i].id);
+        self.link = None;
+        self.link_hidden = false;
         let (start, end) = (self.comments[i].start, self.comments[i].end);
         let room = self.height.saturating_sub(ABOVE + BELOW).max(1);
         let top = if end - start > room {
@@ -760,6 +863,10 @@ impl Doc {
                 self.cursor = here.map(|c| c.id);
             }
         }
+        // A link scrolled off screen is let go.
+        if self.focused_link().is_some_and(|s| s.first < top || s.last >= bottom) {
+            self.link = None;
+        }
     }
 
     /// Moves to the next or previous comment (only top-level ones, unless
@@ -788,7 +895,7 @@ impl Doc {
         };
         match target {
             Some((_, Some(i))) => {
-                self.move_cursor(i, forward);
+                self.enter(i, false);
                 true
             }
             Some((line, None)) => {
@@ -845,6 +952,10 @@ impl Doc {
         self.pending_comment = None;
         self.cursor = Some(id);
         self.top = c.start.saturating_sub(self.height / 4).min(self.max_top());
+        let bottom = self.top + self.height;
+        let first = self.link_stops(&c).into_iter().next();
+        self.link = first.filter(|s| s.first >= self.top && s.last < bottom).map(|_| (id, 0));
+        self.link_hidden = false;
     }
 
     pub fn go_to_anchor(&mut self, slug: &str) {
@@ -1120,13 +1231,26 @@ pub struct CommentSpan {
     pub end: usize,
 }
 
+/// A link in a comment's text, for `j` and `k` to stop on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkStop {
+    /// Its id in the document's links.
+    id: u32,
+    /// The rendered lines it's on: more than one if it wraps.
+    first: usize,
+    last: usize,
+    pub url: String,
+}
+
+/// Whether a line in the comments is empty, but for quote bars.
+fn blank(l: &RLine) -> bool {
+    l.spans
+        .iter()
+        .flat_map(|s| s.content.chars())
+        .all(|c| c == '│' || c.is_whitespace())
+}
+
 fn comment_spans(marks: &[CommentMark], lines: &[RLine]) -> Vec<CommentSpan> {
-    let blank = |l: &RLine| {
-        l.spans
-            .iter()
-            .flat_map(|s| s.content.chars())
-            .all(|c| c == '│' || c.is_whitespace())
-    };
     marks
         .iter()
         .enumerate()
@@ -1380,6 +1504,108 @@ mod tests {
         // Above the first, back to the article.
         doc.step(false, 1);
         assert_eq!(id(&doc), None);
+    }
+
+    /// Comments with links: the first has two in its text (one twice),
+    /// the second none, the third one.
+    fn linked_thread(height: usize) -> Doc {
+        use crate::render::comment_marker;
+        let theme = Theme::plain();
+        let md = format!(
+            "# Story\n\n{}\n\n> ### [bob](<https://news.ycombinator.com/user?id=bob>) · [1h](<https://news.ycombinator.com/item?id=1>)\n>\n> see [a talk](<https://youtube.com/watch?v=a>) and\n> [another one that wraps over the line](<https://youtube.com/watch?v=b>),\n> and [a talk](<https://youtube.com/watch?v=a>) again\n\n{}\n\n> ### carol\n>\n> no links\n\n{}\n\n> ### dave\n>\n> [last](<https://example.com/>)\n",
+            comment_marker(1, 0),
+            comment_marker(2, 0),
+            comment_marker(3, 0),
+        );
+        let mut doc = Doc::new(md);
+        doc.layout(30, &theme);
+        doc.height = height;
+        doc
+    }
+
+    /// Where `j` and `k` are: the comment, and the link if on one.
+    fn stop(doc: &Doc) -> (Option<u64>, Option<String>) {
+        (doc.focused().map(|c| c.id), doc.focused_link().map(|l| l.url))
+    }
+
+    #[test]
+    fn j_and_k_stop_on_each_link_in_a_comment() {
+        let mut doc = linked_thread(40);
+        let stops = doc.link_stops(&doc.comments[0]);
+        let urls: Vec<&str> = stops.iter().map(|s| s.url.as_str()).collect();
+        assert_eq!(urls, ["https://youtube.com/watch?v=a", "https://youtube.com/watch?v=b"], "not the header's, nor one twice");
+        assert!(stops[1].last > stops[1].first, "the second wraps");
+        let some = |id: u64, url: Option<&str>| (Some(id), url.map(String::from));
+        // A comment with links is each of them in turn; one without, itself.
+        let expected = [
+            some(1, Some("https://youtube.com/watch?v=a")),
+            some(1, Some("https://youtube.com/watch?v=b")),
+            some(2, None),
+            some(3, Some("https://example.com/")),
+        ];
+        let mut seen = Vec::new();
+        while stop(&doc) != expected[3] {
+            doc.step(true, 1);
+            if doc.focused().is_some() {
+                seen.push(stop(&doc));
+            }
+        }
+        assert_eq!(seen, expected);
+        // And back, each k undoing a j.
+        for want in expected.iter().rev().skip(1) {
+            doc.step(false, 1);
+            assert_eq!(&stop(&doc), want);
+        }
+        // Above the first link, the article.
+        doc.step(false, 1);
+        assert_eq!(stop(&doc), (None, None));
+        // Esc lets go of a link, and j goes on from it.
+        doc.step(true, 1);
+        assert!(doc.clear_link());
+        assert_eq!(stop(&doc), some(1, None));
+        assert!(!doc.clear_link());
+        doc.step(true, 1);
+        assert_eq!(stop(&doc), some(1, Some("https://youtube.com/watch?v=b")));
+        // ] and [ go comment to comment, onto each one's first link.
+        doc.jump(true, true);
+        assert_eq!(stop(&doc), some(2, None));
+        doc.jump(true, true);
+        assert_eq!(stop(&doc), some(3, Some("https://example.com/")));
+        doc.jump(false, true);
+        assert_eq!(stop(&doc), some(2, None));
+    }
+
+    #[test]
+    fn links_below_the_screen_are_scrolled_to_and_off_it_let_go() {
+        let mut doc = linked_thread(3);
+        doc.jump(true, true);
+        assert_eq!(doc.focused().map(|c| c.id), Some(1));
+        // Each link shows whole before it's chosen.
+        let mut picked = Vec::new();
+        while doc.focused().map(|c| c.id) == Some(1) {
+            doc.step(true, 1);
+            // As drawing does.
+            doc.follow_view();
+            assert!(doc.top < 40, "never moves on");
+            if let Some(l) = doc.focused_link() {
+                assert!(l.first >= doc.top && l.last < doc.top + doc.height, "{l:?} on screen");
+                if picked.last() != Some(&l.url) {
+                    picked.push(l.url);
+                }
+            }
+        }
+        assert_eq!(picked.len(), 2);
+        // Up from below: onto the last link once it's back on screen.
+        doc.step(false, 1);
+        while doc.focused_link().is_none() {
+            doc.step(false, 1);
+            assert!(doc.top > 0, "never comes to it");
+        }
+        assert_eq!(doc.focused_link().map(|l| l.url).as_deref(), Some("https://youtube.com/watch?v=b"));
+        // Scrolled away, the link isn't chosen any more.
+        doc.scroll_by(-3);
+        doc.follow_view();
+        assert_eq!(doc.focused_link(), None);
     }
 
     #[test]

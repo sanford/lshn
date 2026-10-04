@@ -355,6 +355,8 @@ struct App {
     user_page: Option<String>,
     /// Where following links came from, to go back to.
     history: Vec<nav::Back>,
+    /// Pages opened in the browser this time, whose links are dimmed.
+    visited: HashSet<String>,
     /// A story an HN link was followed to, to open once it's loaded.
     opening: Option<u64>,
     /// The comment to go to in the story being opened.
@@ -393,6 +395,13 @@ struct App {
     list_in_reader: bool,
     /// The story selected when the reader was left for the list.
     left_on: Option<u64>,
+    /// What clicking the header does, at the last draw: its row, and the
+    /// columns of `lshn` (`None`: back to the list) and of each tab, with
+    /// its key.
+    header_hits: (u16, Vec<(u16, u16, Option<char>)>),
+    /// Whether a story's been chosen in the list since it opened: till
+    /// then, a newer list (fetched, after the cached one) starts at the top.
+    chose: bool,
     /// The width stories and the list share, at the last draw.
     body_width: u16,
     /// Where `C` came to the comments from, to go back to.
@@ -443,6 +452,7 @@ impl App {
             max_width,
             fetcher,
             asked: HashSet::new(),
+            visited: HashSet::new(),
             waiting: Waiting::default(),
             feed: Feed::Top,
             search: None,
@@ -495,6 +505,8 @@ impl App {
             reading: None,
             list_in_reader: false,
             left_on: None,
+            header_hits: (0, Vec::new()),
+            chose: false,
             body_width: 0,
             before_comments: HashMap::new(),
             outline_pane: false,
@@ -640,6 +652,7 @@ impl App {
             self.asked.remove(&Asked::Feed(feed));
             self.ask(Asked::Feed(feed), Job::Feed(feed), true);
         }
+        self.chose = false;
         self.refresh();
         self.list.select(None);
         *self.list.offset_mut() = 0;
@@ -654,6 +667,7 @@ impl App {
         self.typing = false;
         self.focus = Focus::List;
         self.send(Job::Search(query), true);
+        self.chose = false;
         self.refresh();
         self.list.select(None);
         *self.list.offset_mut() = 0;
@@ -985,6 +999,14 @@ impl App {
         Some(self.doc(key))
     }
 
+    /// The target of the link `j` and `k` are on, in a comment, reading.
+    fn focused_link(&mut self) -> Option<String> {
+        if self.focus != Focus::Reader {
+            return None;
+        }
+        Some(self.current()?.focused_link()?.url)
+    }
+
     /// The comment the cursor's on, reading a story.
     fn cursor_comment(&mut self) -> Option<u64> {
         if self.user_page.is_some() && (self.focus == Focus::Reader || self.kept()) {
@@ -1013,7 +1035,7 @@ impl App {
 
     /// Re-filters the list, keeping the same story selected.
     fn refresh(&mut self) {
-        let keep = self.selected_id();
+        let keep = self.selected_id().filter(|_| self.chose);
         let ids = self.ids.as_deref().unwrap_or_default();
         let listed: Vec<u64> = ids.iter().copied().filter(|&id| !self.hidden(id)).collect();
         if self.filter.is_empty() {
@@ -1084,12 +1106,14 @@ impl App {
             .unwrap_or(0)
             .saturating_add_signed(delta);
         self.list.select(Some(i.min(self.shown.len() - 1)));
+        self.chose = true;
     }
 
     /// Opens the selected story full screen, where the preview was: at the
     /// same comment, or the same part of the article.
     fn read_selected(&mut self) {
         let Some(id) = self.selected_id() else { return };
+        self.chose = true;
         if self.kept() || self.reading == Some(id) {
             // Back to what was being read, links followed and all.
             self.focus = Focus::Reader;
@@ -1180,6 +1204,13 @@ impl App {
     /// `w`: the story's link in the browser (or its HN page, with `W` or
     /// when it has no link).
     fn open_in_browser(&mut self, hn_page: bool) {
+        // On a link in a comment, that link.
+        if !hn_page && let Some(url) = self.focused_link() {
+            return match crate::hn::link(&url) {
+                Some(_) => self.follow(&url),
+                None => self.open_outside_now(&url),
+            };
+        }
         let reader_shown = self.focus == Focus::Reader || self.kept();
         if let (true, Some(name)) = (reader_shown, &self.user_page) {
             let url = crate::hn::user_url(name);
@@ -1205,7 +1236,10 @@ impl App {
         match crate::open::web(url) {
             Ok(target) => {
                 self.flash = Some(match crate::open::open(&target) {
-                    Ok(()) => format!("Opened {}", target.target),
+                    Ok(()) => {
+                        self.visited.insert(target.target.clone());
+                        format!("Opened {}", target.target)
+                    }
                     Err(e) => format!("Couldn't open {}: {e}", target.target),
                 });
             }
@@ -1513,7 +1547,12 @@ impl App {
             KeyCode::PageUp => self.select_by(-page),
             KeyCode::Char('g') | KeyCode::Home => self.select_by(isize::MIN / 2),
             KeyCode::Char('G') | KeyCode::End => self.select_by(isize::MAX / 2),
-            KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => self.read_selected(),
+            // Enter, full screen; `l` and `→`, to the right, as `Tab`.
+            KeyCode::Enter => {
+                self.read_selected();
+                self.list_in_reader = false;
+            }
+            KeyCode::Char('l') | KeyCode::Right => self.switch_view(),
             KeyCode::Char('/') => self.typing = true,
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
@@ -1564,6 +1603,10 @@ impl App {
             // never quits from here: that's for the list, so a Left too
             // many never loses your place.
             KeyCode::Esc | KeyCode::Backspace | KeyCode::Left | KeyCode::Char('h') => {
+                // Off a link in a comment first.
+                if self.current().is_some_and(Doc::clear_link) {
+                    return false;
+                }
                 if !self.go_back() {
                     self.leave_reader();
                 }
@@ -1725,6 +1768,20 @@ impl App {
             n => Span::raw(format!("i {n} new replies")).yellow().bold(),
         });
         title.push(Span::raw("  "));
+        // `lshn`, then each tab, by its key: where they are, to click.
+        let keys = [None]
+            .into_iter()
+            .chain(Feed::ALL.iter().enumerate().map(|(i, _)| char::from_digit(i as u32 + 1, 10)))
+            .chain([Some('s'), Some('i')]);
+        let mut x = area.x;
+        let mut hits = Vec::new();
+        let mut spans = title.iter().map(|s| s.width() as u16);
+        for key in keys {
+            let w = spans.next().unwrap_or_default();
+            hits.push((x, x + w, key));
+            x += w + spans.next().unwrap_or_default();
+        }
+        self.header_hits = (area.y, hits);
         let used: usize = title.iter().map(|s| s.width()).sum();
         // Reading: which section the top of the screen is in.
         let section: Vec<String> = match self.focus {
@@ -1977,10 +2034,13 @@ impl App {
             accent: theme.heading(1),
             band: theme.code_bg,
         });
+        // Out of `self` while the document has it.
+        let visited = std::mem::take(&mut self.visited);
         if let Some(doc) = self.current() {
             doc.show_focus(focus);
-            doc.draw(f, area, width, &theme);
+            doc.draw(f, area, width, &theme, &visited);
         }
+        self.visited = visited;
         self.draw_figure(f);
         // After the document, so it shows the section it's scrolled to.
         if let Some(pane) = pane {
@@ -1997,6 +2057,8 @@ impl App {
             f.render_widget(Paragraph::new(Line::from(format!(" {msg}")).yellow()), area);
             return;
         }
+        // On a link in a comment: where it goes, and what to do with it.
+        let link = self.focused_link();
         // Who `r` would answer, reading.
         let reply = match self.acting_on() {
             Some(id) if self.stories.contains_key(&id) => "comment".to_string(),
@@ -2043,6 +2105,12 @@ impl App {
                     keys.extend([("?", "help"), ("q", "quit")]);
                     keys
                 }
+                Focus::Reader if link.is_some() => vec![
+                    ("w", "open link"),
+                    ("c", "copy"),
+                    ("↑↓", "next link"),
+                    ("esc", "off link"),
+                ],
                 Focus::Reader => vec![
                     ("↑↓", "scroll"),
                     ("C ] [", "comments"),
@@ -2078,6 +2146,18 @@ impl App {
         let pos_width = wrap::width(&position) as u16 + 1;
         let [keys_area, pos_area] =
             Layout::horizontal([Constraint::Min(0), Constraint::Length(pos_width)]).areas(area);
+        // The link's target before the keys, cut short to leave them room:
+        // without `https://` and `www.`, so the site shows.
+        let room = usize::from(keys_area.width).saturating_sub(wrap::spans_width(&spans) + 2);
+        if let Some(url) = link
+            && room >= 12
+        {
+            let short = url.strip_prefix("https://").unwrap_or(&url);
+            let short = short.strip_prefix("www.").unwrap_or(short);
+            let url = menu::fit(&safe::printable(short), room);
+            spans.insert(1, Span::raw(url).underlined());
+            spans.insert(2, Span::raw("  "));
+        }
         f.render_widget(Paragraph::new(Line::from(spans)), keys_area);
         f.render_widget(
             Paragraph::new(Line::from(format!("{position} ")).dim()).right_aligned(),
@@ -2272,7 +2352,8 @@ fn draw_help(f: &mut Frame) {
         (
             "Stories",
             &[
-                ("⏎ → l", "Read the selected story full screen"),
+                ("⏎", "Read the selected story full screen"),
+                ("→ l", "To the story, beside the list if there's room (as tab)"),
                 ("⏎", "Reading: beside the list, full screen; full screen, back to the list"),
                 ("tab", "Between the list and the story (both stay, if there's room)"),
                 ("\\", "Show or hide the list while reading"),
@@ -2288,6 +2369,7 @@ fn draw_help(f: &mut Frame) {
             "Comments",
             &[
                 ("C", "To the comments, and back"),
+                ("↓ ↑ j k", "Next / previous comment, or link in it (w opens it)"),
                 ("] [", "Next / previous comment (or heading)"),
                 ("} {", "Next / previous thread, skipping replies"),
                 ("space", "On a comment: fold it and its replies, or unfold"),
@@ -2300,7 +2382,7 @@ fn draw_help(f: &mut Frame) {
             "Links and searching",
             &[
                 ("f", "Follow a link (type the letters shown on it)"),
-                ("w W", "Open the story's link / its HN page in the browser"),
+                ("w W", "Open the story's link (or the comment's, on one) / its HN page"),
                 ("/ n N", "Reading: search; next / previous match"),
                 ("^s ^r", "Search forward / back; typing: next / previous"),
             ],
@@ -2649,12 +2731,39 @@ mod tests {
         assert!(app.focus == Focus::List, "back to the list");
         assert_eq!(app.selected_id(), Some(2), "where it was");
         assert_eq!(app.current_key(), Some((2, false)), "the story beside it");
+        // l goes back to the right, with the list beside, whatever Enter
+        // did before; Enter from the list, full screen.
+        let l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
+        app.key(l);
+        assert!(app.focus == Focus::Reader && app.list_in_reader, "beside the list");
+        app.key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
+        assert!(app.focus == Focus::List);
+        app.key(enter);
+        assert!(app.focus == Focus::Reader && !app.list_in_reader, "full screen from the list");
+        app.key(enter);
         // Too narrow for two panes: the story's alone, so back to the list.
         app.body_width = 70;
         app.list_in_reader = true;
         app.key(tab);
         app.key(enter);
         assert!(app.focus == Focus::List);
+    }
+
+    /// A newer list (the fetched one, after the cached one) starts at the
+    /// top, till a story's been chosen; then that one stays selected.
+    #[test]
+    fn a_newer_list_starts_at_the_top_till_one_is_chosen() {
+        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        app.ids = Some(vec![1, 2, 3]);
+        app.refresh();
+        assert_eq!(app.selected_id(), Some(1));
+        app.ids = Some(vec![5, 1, 2]);
+        app.refresh();
+        assert_eq!(app.selected_id(), Some(5), "the top, not the old top");
+        app.select_by(1);
+        app.ids = Some(vec![6, 5, 1]);
+        app.refresh();
+        assert_eq!(app.selected_id(), Some(1), "the one chosen");
     }
 
     /// Tab goes back and forth between the list and the story: on a wide

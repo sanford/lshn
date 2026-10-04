@@ -177,7 +177,7 @@ impl<A: Clone> Menu<A> {
 }
 
 /// `s` in at most `room` columns, cut short with "…" if it has to be.
-fn fit(s: &str, room: usize) -> String {
+pub(super) fn fit(s: &str, room: usize) -> String {
     if s.width() <= room {
         return s.to_string();
     }

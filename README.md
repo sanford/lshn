@@ -69,7 +69,8 @@ In the list:
 |---|---|
 | `↑` `↓` `j` `k` | Move; with `Shift` (`⇧↑` `⇧↓` `K` `J`), a page at a time |
 | `g` `G` | The first story, the last |
-| `Enter` `→` `l` | Read the story full screen |
+| `Enter` | Read the story full screen |
+| `→` `l` | Go to the story, as `Tab` does: beside the list, if there's room |
 | `Tab` | Go to the story. On a terminal 110 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
 | `C` | Jump the preview to the comments, and back |
 | `Space` `b` | Page through the preview |
@@ -85,7 +86,7 @@ Reading:
 
 | Key | |
 |---|---|
-| `↑` `↓` `j` `k` | Scroll two lines (`scroll` in the settings); in the comments, go comment to comment. `J` `K`, a page |
+| `↑` `↓` `j` `k` | Scroll two lines (`scroll` in the settings); in the comments, go comment to comment, stopping on each link in one. `J` `K`, a page |
 | `Space` `b`, `d` `u`, `g` `G` | Page, half page; top, bottom. On a comment, `Space` folds it |
 | `F` `E` | Fold every thread to a line; unfold everything |
 | `C` | To the comments, and back to where you were |
@@ -104,7 +105,7 @@ Anywhere:
 
 | Key | |
 |---|---|
-| `w` `W` | Open the story's link, or its HN page, in the browser |
+| `w` `W` | Open the story's link, or its HN page, in the browser. On a link in a comment, `w` opens that |
 | `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article. `v` there selects lines from the keyboard: `j` `k` for more or less, then `c` |
 | `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story. Again takes the vote back |
 | `r` | Reply to the same, in a box over the bottom of the screen |
@@ -118,7 +119,7 @@ Anywhere:
 
 `Home` `End` `PgUp` `PgDn` do what they say. Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
-So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), reads the story shown beside the list, follows a link, jumps through the scrollbar, or goes to a place in the outline. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
+So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), reads the story shown beside the list, follows a link, jumps through the scrollbar, or goes to a place in the outline. In the header, clicking `lshn` goes back to the list, on the first tab (Top), and clicking a tab (`2 New`, `s Search`, …) does what its key does. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
 
 ### Following links
 
@@ -128,7 +129,7 @@ Every author's name is a link: follow it (`f`, or click) for their page — karm
 
 `v` and `r` act as you on HN, so the first time, `L` (or `v` or `r` themselves) asks you to log in. lshn keeps HN's session, never your password: in the system's keyring (Keychain on macOS, Credential Manager on Windows, the Secret Service on Linux) or, where there isn't one, in `~/.lshn/session`, encrypted with a passphrase you choose, and asked for once a run.
 
-In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `F` folds every thread, `E` unfolds everything. `]` and `[` also go comment to comment, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in a box over the bottom of the screen, with what you're answering still in view above it: the text wraps as you type, `Enter` starts a new line, and pasting works. `Tab` goes to its **Cancel** and **Post** buttons, and back (or click them); `Ctrl-S` posts from anywhere, and `Esc` cancels. Cancelling keeps what you wrote: `r` on the same comment carries on with it. For a long reply, `Ctrl-O` opens it in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line, and brings it back to the box. Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
+In the comments, `j` and `k` (or `↓` `↑`) go from comment to comment, and the page only scrolls as far as it takes to show the next one whole; one taller than the screen is read down a line at a time first. The selected comment has a band behind it and its bars in the accent color, with `r reply · v upvote · space fold` beside its author, and the footer says who `r` would answer. `Space` folds it and its replies to one line (`▸ 12 more`) and back; `F` folds every thread, `E` unfolds everything. In a comment with links in it, `↓` and `↑` go link to link instead: coming to the comment highlights its first link (or from below, its last), the footer shows where it goes, `w` opens it (`c` copies it), and `Esc` lets go of it. Links you've opened are dimmed. `]` and `[` also go comment to comment, links or not, and `}` and `{` thread to thread. `v` and `r` act on the selected comment, or above the comments, on the story. A reply is written in a box over the bottom of the screen, with what you're answering still in view above it: the text wraps as you type, `Enter` starts a new line, and pasting works. `Tab` goes to its **Cancel** and **Post** buttons, and back (or click them); `Ctrl-S` posts from anywhere, and `Esc` cancels. Cancelling keeps what you wrote: `r` on the same comment carries on with it. For a long reply, `Ctrl-O` opens it in `$VISUAL` or `$EDITOR`, with what you're replying to quoted below a line, and brings it back to the box. Drafts stay in `~/.lshn/drafts/` until they're posted, so nothing is lost if HN says no. When it does — you're posting too fast, say — lshn tells you what it said, and never tries again by itself.
 
 ![Reading a story's comments full screen: threads in bars, and the selected comment on a band, with r reply · v upvote · space fold beside its author](docs/comments.png)
 

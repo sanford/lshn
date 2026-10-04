@@ -86,6 +86,10 @@ impl App {
             },
         };
         let mut items = items;
+        // The link `j` and `k` are on, first.
+        if let Some(url) = self.focused_link() {
+            items.insert(0, copies('u', "Link in comment", url));
+        }
         items.push(Item::new(
             'v',
             "Select…",

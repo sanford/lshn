@@ -242,7 +242,10 @@ impl App {
             Prompt::Open(target) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     self.flash = Some(match crate::open::open(&target) {
-                        Ok(()) => format!("Opened {}", target.what),
+                        Ok(()) => {
+                            self.visited.insert(target.target.clone());
+                            format!("Opened {}", target.what)
+                        }
                         Err(e) => format!("Couldn't open {}: {e}", target.what),
                     });
                 }

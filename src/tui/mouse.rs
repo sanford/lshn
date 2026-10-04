@@ -4,13 +4,15 @@
 
 use super::nav::Prompt;
 use super::{App, Focus};
+use crate::hn::Feed;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use ratatui::layout::Position;
 
-/// Lines per wheel notch.
-const WHEEL: isize = 3;
+/// Lines per wheel notch: one, since a wheel or trackpad already goes as
+/// fast as it's turned.
+const WHEEL: isize = 1;
 
 impl App {
     pub(super) fn mouse(&mut self, m: MouseEvent) {
@@ -85,6 +87,7 @@ impl App {
                 }
             }
             MouseEventKind::Down(MouseButton::Left) if over_list => self.click_list(y),
+            MouseEventKind::Down(MouseButton::Left) => self.click_header(x, y),
             _ => {}
         }
     }
@@ -144,6 +147,24 @@ impl App {
 
     /// A click on a story in the list selects it, or opens it if it was
     /// already selected.
+    /// `lshn` in the header goes back to the list, and to the first tab
+    /// (Top) from another; a tab, to what its key does.
+    fn click_header(&mut self, x: u16, y: u16) {
+        let (row, hits) = &self.header_hits;
+        let hit = hits.iter().find(|(from, to, _)| y == *row && (*from..*to).contains(&x));
+        let home = self.feed == Feed::ALL[0] && self.search.is_none();
+        match hit.map(|h| h.2) {
+            Some(None) if !home => {
+                self.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
+            }
+            Some(None) if self.focus == Focus::Reader => self.leave_reader(),
+            Some(Some(c)) => {
+                self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            _ => {}
+        }
+    }
+
     fn click_list(&mut self, y: u16) {
         // Stories take a row or more each: count down from the top one.
         let mut row = usize::from(y.saturating_sub(self.list_area.y));
@@ -161,6 +182,7 @@ impl App {
             self.read_selected();
         } else {
             self.list.select(Some(i));
+            self.chose = true;
             self.focus = Focus::List;
         }
     }
