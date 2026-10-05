@@ -70,7 +70,8 @@ pub fn all(md: &str) -> Vec<Found> {
     let starts: Vec<usize> = std::iter::once(0)
         .chain(md.match_indices('\n').map(|(i, _)| i + 1))
         .collect();
-    let offset = |line: usize, col: usize| Some(starts.get(line.checked_sub(1)?)? + col.checked_sub(1)?);
+    let offset =
+        |line: usize, col: usize| Some(starts.get(line.checked_sub(1)?)? + col.checked_sub(1)?);
     let line_end = |line: usize| starts.get(line).copied().unwrap_or(md.len());
     let mut found = Vec::new();
     for node in root.descendants() {
@@ -78,7 +79,11 @@ pub fn all(md: &str) -> Vec<Found> {
             continue;
         };
         let url = link.url.clone();
-        let path = url.split(['?', '#']).next().unwrap_or("").to_ascii_lowercase();
+        let path = url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
         if !url.starts_with("http") || path.ends_with(".svg") {
             continue;
         }
@@ -97,7 +102,11 @@ pub fn all(md: &str) -> Vec<Found> {
             .find(|n| n.parent().is_some_and(|p| p.parent().is_none()))
             .unwrap_or(node);
         let after = line_end(block.data().sourcepos.end.line).max(end);
-        found.push(Found { url, at: start..end, after });
+        found.push(Found {
+            url,
+            at: start..end,
+            after,
+        });
         if found.len() == MAX_PICTURES {
             break;
         }
@@ -107,7 +116,10 @@ pub fn all(md: &str) -> Vec<Found> {
 
 /// Downloads a picture, to be decoded.
 pub fn download(url: &str) -> Result<Vec<u8>, String> {
-    let mut response = crate::hn::agent().get(url).call().map_err(|e| e.to_string())?;
+    let mut response = crate::hn::agent()
+        .get(url)
+        .call()
+        .map_err(|e| e.to_string())?;
     response
         .body_mut()
         .with_config()
@@ -176,7 +188,9 @@ impl Drawn {
             });
         }
         let size = Size::new(cols as u16, rows as u16);
-        SlicedProtocol::new(picker, picture.clone(), Some(size)).ok().map(Drawn::Sliced)
+        SlicedProtocol::new(picker, picture.clone(), Some(size))
+            .ok()
+            .map(Drawn::Sliced)
     }
 
     /// What's to be written to the terminal before it can be shown, once.
@@ -223,7 +237,11 @@ impl Drawn {
                     }
                 }
             }
-            Drawn::Rows { cols, rows, soft: light } => {
+            Drawn::Rows {
+                cols,
+                rows,
+                soft: light,
+            } => {
                 let rows = if soft { light } else { rows };
                 let left = area.x + x;
                 let cols = (*cols as u16).min(area.right().saturating_sub(left));
@@ -280,12 +298,22 @@ fn kitty_id() -> u32 {
 /// Kitty's escapes sending the picture at `cols`×`rows` cells, as `id`,
 /// to be shown wherever its cells are. That size is given, not left to be
 /// worked out from the picture's as Kitty does, since iTerm2 doesn't.
-fn kitty_send(picture: &DynamicImage, cols: usize, rows: usize, cw: u32, ch: u32, id: u32) -> Option<String> {
+fn kitty_send(
+    picture: &DynamicImage,
+    cols: usize,
+    rows: usize,
+    cw: u32,
+    ch: u32,
+    id: u32,
+) -> Option<String> {
     use base64::Engine;
     let scaled = picture.resize(cols as u32 * cw, rows as u32 * ch, FilterType::Triangle);
     let mut bytes = Vec::new();
     scaled
-        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
         .ok()?;
     let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
     // In pieces of at most 4096 characters, each saying if more follow.
@@ -337,8 +365,11 @@ fn iterm_rows(
                 .write_with_encoder(JpegEncoder::new_with_quality(&mut bytes, 85))
                 .ok()?;
         } else {
-            row.write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
-                .ok()?;
+            row.write_to(
+                &mut std::io::Cursor::new(&mut bytes),
+                image::ImageFormat::Png,
+            )
+            .ok()?;
         }
         out.push(format!(
             "\x1b[{cols}X\x1b]1337;File=inline=1;size={};width={w}px;height={h}px;preserveAspectRatio=0;doNotMoveCursor=1:{}\x07",
@@ -353,12 +384,19 @@ fn iterm_rows(
 /// Where a picture goes in a document: `<!-- image: W H ROWS N -->`, for
 /// the article's `N`th picture.
 pub fn marker(picture: &DynamicImage, rows: usize, index: usize) -> String {
-    format!("<!-- image: {} {} {rows} {index} -->", picture.width(), picture.height())
+    format!(
+        "<!-- image: {} {} {rows} {index} -->",
+        picture.width(),
+        picture.height()
+    )
 }
 
 /// The size in pixels, most rows and which picture, from a marker.
 pub fn parse_marker(html: &str) -> Option<(u32, u32, usize, usize)> {
-    let rest = html.trim().strip_prefix("<!-- image:")?.strip_suffix("-->")?;
+    let rest = html
+        .trim()
+        .strip_prefix("<!-- image:")?
+        .strip_suffix("-->")?;
     let mut numbers = rest.split_whitespace();
     let w = numbers.next()?.parse().ok()?;
     let h = numbers.next()?.parse().ok()?;
@@ -392,7 +430,10 @@ mod tests {
         let found = all(md);
         let urls: Vec<&str> = found.iter().map(|f| f.url.as_str()).collect();
         assert_eq!(urls, ["https://x.com/p.jpg?w=640", "https://x.com/l.png"]);
-        assert_eq!(&md[found[0].at.clone()], "![a photo](https://x.com/p.jpg?w=640)");
+        assert_eq!(
+            &md[found[0].at.clone()],
+            "![a photo](https://x.com/p.jpg?w=640)"
+        );
         // Shown after its paragraph, not in the middle of it.
         assert!(md[..found[0].after].ends_with("Still it.\n"));
         assert_eq!(&md[found[1].at.clone()], "![linked](https://x.com/l.png)");
@@ -405,7 +446,10 @@ mod tests {
 
     #[test]
     fn markers_say_the_size() {
-        assert_eq!(parse_marker("<!-- image: 800 600 12 3 -->"), Some((800, 600, 12, 3)));
+        assert_eq!(
+            parse_marker("<!-- image: 800 600 12 3 -->"),
+            Some((800, 600, 12, 3))
+        );
         assert_eq!(parse_marker("<!-- image: 0 600 12 0 -->"), None);
         assert_eq!(parse_marker("<!-- rule: x -->"), None);
     }
@@ -419,6 +463,3 @@ mod tests {
         assert_eq!(cells(200, 100, 80, 30), (20, 5));
     }
 }
-
-
-

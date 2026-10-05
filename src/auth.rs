@@ -98,11 +98,11 @@ fn get(session: &Session, path: &str) -> Result<Reply, String> {
 
 /// Logs in, for a session to keep.
 pub fn login(user: &str, password: &str) -> Result<Session, String> {
-    let r = reply(
-        agent()
-            .post(format!("{HN}/login"))
-            .send_form([("acct", user), ("pw", password), ("goto", "news")]),
-    )?;
+    let r = reply(agent().post(format!("{HN}/login")).send_form([
+        ("acct", user),
+        ("pw", password),
+        ("goto", "news"),
+    ]))?;
     if let Some(cookie) = r.set_cookie.iter().find_map(|c| user_cookie(c)) {
         return Ok(Session { cookie });
     }
@@ -190,7 +190,8 @@ pub fn reply_form(session: &Session, id: u64, is_story: bool) -> Result<Form, St
     if logged_out(&page.body) {
         return Err(not_logged_in(&page.body));
     }
-    Err(refusal(&page.body).unwrap_or_else(|| "No way to reply to that (too old, or locked?)".into()))
+    Err(refusal(&page.body)
+        .unwrap_or_else(|| "No way to reply to that (too old, or locked?)".into()))
 }
 
 /// Whether HN's page says you're not logged in: it asks you to, with its
@@ -200,7 +201,9 @@ fn logged_out(page: &str) -> bool {
 }
 
 fn comment_form(page: &str) -> Option<Form> {
-    let start = page.find("action=\"comment\"").or_else(|| page.find("action='comment'"))?;
+    let start = page
+        .find("action=\"comment\"")
+        .or_else(|| page.find("action='comment'"))?;
     let form = &page[start..start + page[start..].find("</form>")?];
     let input = |name: &str| {
         form.split('<')
@@ -230,7 +233,8 @@ pub fn post(session: &Session, form: &Form, text: &str) -> Result<(), String> {
             ]),
     )?;
     // Posted: HN sends you on to the thread.
-    if (300..400).contains(&r.status) && r.location.as_deref().is_some_and(|l| !l.contains("login")) {
+    if (300..400).contains(&r.status) && r.location.as_deref().is_some_and(|l| !l.contains("login"))
+    {
         return Ok(());
     }
     Err(refusal(&r.body).unwrap_or_else(|| format!("HN said {}", r.status)))
@@ -253,7 +257,9 @@ fn refusal(page: &str) -> Option<String> {
     let at = MESSAGES.iter().find_map(|m| text.find(m))?;
     // The sentence it's in.
     let start = text[..at].rfind(['.', '!', '?']).map_or(0, |i| i + 1);
-    let end = text[at..].find(['.', '!', '?']).map_or(text.len(), |i| at + i + 1);
+    let end = text[at..]
+        .find(['.', '!', '?'])
+        .map_or(text.len(), |i| at + i + 1);
     Some(text[start..end].trim().to_string())
 }
 
@@ -261,7 +267,10 @@ fn refusal(page: &str) -> Option<String> {
 /// go on one line.
 fn not_logged_in(page: &str) -> String {
     let said: String = plain(page).chars().take(80).collect();
-    format!("HN didn't take the login (it said \"{}\"): L to log in again", said.trim())
+    format!(
+        "HN didn't take the login (it said \"{}\"): L to log in again",
+        said.trim()
+    )
 }
 
 /// A page's text, without its tags, in one line.
@@ -353,7 +362,10 @@ mod tests {
         );
         assert_eq!(vote_link(ITEM, 42, "un"), None, "not voted on yet");
         assert_eq!(vote_link(ITEM, 43, "up"), None);
-        assert_eq!(vote_link(ITEM, 43, "un").as_deref(), Some("vote?id=43&how=un&auth=def"));
+        assert_eq!(
+            vote_link(ITEM, 43, "un").as_deref(),
+            Some("vote?id=43&how=un&auth=def")
+        );
         assert_eq!(vote_link(ITEM, 44, "up"), None);
     }
 
@@ -383,17 +395,25 @@ mod tests {
     #[test]
     fn takes_the_session_from_the_cookie() {
         assert_eq!(
-            user_cookie("user=pg&Xy12; expires=Sat, 01 Jan 2050 00:00:00 GMT; Secure; HttpOnly").as_deref(),
+            user_cookie("user=pg&Xy12; expires=Sat, 01 Jan 2050 00:00:00 GMT; Secure; HttpOnly")
+                .as_deref(),
             Some("pg&Xy12")
         );
         assert_eq!(user_cookie("user=; Max-Age=0"), None);
         assert_eq!(user_cookie("other=pg&x"), None);
-        assert_eq!(Session { cookie: "pg&Xy12".into() }.user(), "pg");
+        assert_eq!(
+            Session {
+                cookie: "pg&Xy12".into()
+            }
+            .user(),
+            "pg"
+        );
     }
 
     #[test]
     fn reports_what_hn_says_no_with() {
-        let page = "<html><body><td>You're posting too fast. Please slow down. Thanks.</td></body></html>";
+        let page =
+            "<html><body><td>You're posting too fast. Please slow down. Thanks.</td></body></html>";
         assert_eq!(refusal(page).as_deref(), Some("You're posting too fast."));
         assert_eq!(refusal("<p>All fine</p>"), None);
     }
@@ -403,15 +423,24 @@ mod tests {
         let draft = draft("bob", "first line\nsecond");
         assert!(draft.contains("# > first line\n# > second\n"));
         assert_eq!(reply_text(&draft), "");
-        assert_eq!(reply_text(&format!("My reply.\n\n  code\n{draft}")), "My reply.\n\n  code");
+        assert_eq!(
+            reply_text(&format!("My reply.\n\n  code\n{draft}")),
+            "My reply.\n\n  code"
+        );
     }
 
     #[test]
     fn attributes_quoted_any_way() {
         assert_eq!(attr("a href='x' id=y", "href").as_deref(), Some("x"));
-        assert_eq!(attr(r#"input name="hmac" value="v""#, "value").as_deref(), Some("v"));
+        assert_eq!(
+            attr(r#"input name="hmac" value="v""#, "value").as_deref(),
+            Some("v")
+        );
         assert_eq!(attr("a id=y>", "id").as_deref(), Some("y"));
         // Not a longer attribute that ends the same way.
-        assert_eq!(attr("a data-href='no' href='yes'", "href").as_deref(), Some("yes"));
+        assert_eq!(
+            attr("a data-href='no' href='yes'", "href").as_deref(),
+            Some("yes")
+        );
     }
 }

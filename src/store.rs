@@ -123,7 +123,9 @@ pub fn user(dir: Option<&Path>) -> Option<String> {
 
 /// Remembers the username you logged in as, or with `None`, forgets it.
 pub fn set_user(dir: Option<&Path>, user: Option<&str>) {
-    let Some(file) = dir.map(|d| d.join("user")) else { return };
+    let Some(file) = dir.map(|d| d.join("user")) else {
+        return;
+    };
     match user {
         Some(user) => write(&file, format!("{user}\n").as_bytes()),
         None => {
@@ -237,7 +239,8 @@ fn write(path: &Path, bytes: &[u8]) {
         return;
     }
     // Unique per thread, since workers write at the same time.
-    let tmp = path.with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
+    let tmp = path
+        .with_extension(format!("tmp{:?}", std::thread::current().id()).replace(['(', ')'], ""));
     if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_err() {
         let _ = std::fs::remove_file(&tmp);
     }
@@ -296,7 +299,10 @@ mod tests {
         assert_eq!(cache.get::<Vec<u64>>("feed", "top"), Some(vec![3, 1, 2]));
         assert!(dir.join("cache/feed/top.json").is_file());
         // Nothing left over from writing it.
-        assert_eq!(std::fs::read_dir(dir.join("cache/feed")).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_dir(dir.join("cache/feed")).unwrap().count(),
+            1
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

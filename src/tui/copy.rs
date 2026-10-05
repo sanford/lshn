@@ -3,12 +3,12 @@
 //! saying just what it'll copy. Dragging over the text with the mouse
 //! copies what it covers (see `mouse`).
 
-use super::menu::{Item, Menu};
-use super::nav::Prompt;
-use super::{App, Focus};
-use crate::article::Article;
-use crate::clipboard;
 use super::act::find;
+use super::menu::{Item, Menu};
+use super::nav::{Page, Prompt};
+use super::{App, Focus};
+use crate::article::{Article, Source};
+use crate::clipboard;
 use crate::hn;
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Stylize;
@@ -42,7 +42,10 @@ pub(super) fn amount(text: &str) -> String {
 
 /// `[text](url)`, with the brackets in `text` escaped.
 fn markdown_link(text: &str, url: &str) -> String {
-    let text = text.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let text = text
+        .replace('\\', "\\\\")
+        .replace('[', "\\[")
+        .replace(']', "\\]");
     format!("[{text}](<{url}>)")
 }
 
@@ -55,17 +58,28 @@ impl App {
     /// `c`: what to copy, and what each choice will copy.
     pub(super) fn open_copy(&mut self) {
         let reader_shown = self.focus == Focus::Reader || self.kept();
-        let items = match (reader_shown, self.user_page.clone()) {
-            (true, Some(name)) if name == super::REPLIES => {
+        let items = match (reader_shown, self.page.clone()) {
+            (true, Some(Page::Replies)) => {
                 let me = self.replies_for.clone().unwrap_or_default();
                 let url = hn::threads_url(&me);
                 let mut items = vec![copies('h', "On HN", url)];
-                match self.current().and_then(|d| Some((d.focused()?.id, d.focused_text()))) {
+                match self
+                    .current()
+                    .and_then(|d| Some((d.focused()?.id, d.focused_text())))
+                {
                     Some((id, text)) => {
-                        let by = self.reply_to_you(id).map(|r| r.by.clone()).unwrap_or_default();
+                        let by = self
+                            .reply_to_you(id)
+                            .map(|r| r.by.clone())
+                            .unwrap_or_default();
                         if let Some(text) = text {
                             let what = format!("{by}'s, {}", amount(&text));
-                            items.push(Item::new('c', "Reply", what, Copy::Text(text, format!("{by}'s reply"))));
+                            items.push(Item::new(
+                                'c',
+                                "Reply",
+                                what,
+                                Copy::Text(text, format!("{by}'s reply")),
+                            ));
                         }
                         items.push(copies('k', "Reply's link", hn::item_url(id)));
                     }
@@ -73,7 +87,19 @@ impl App {
                 }
                 items
             }
-            (true, Some(name)) => {
+            (true, Some(Page::Web(url))) => {
+                let source = Source::Page(url.clone());
+                let title = match self.articles.get(&source) {
+                    Some(Article::Text { title, .. }) if !title.is_empty() => title.clone(),
+                    _ => hn::domain(&url).unwrap_or_else(|| url.clone()),
+                };
+                vec![
+                    copies('l', "Link", url.clone()),
+                    copies('m', "Markdown link", markdown_link(&title, &url)),
+                    self.article_item(&source, Some(&url)),
+                ]
+            }
+            (true, Some(Page::User(name))) => {
                 let url = hn::user_url(&name);
                 vec![
                     copies('h', "Their HN page", url.clone()),
@@ -86,9 +112,9 @@ impl App {
             },
         };
         let mut items = items;
-        // The link `j` and `k` are on, first.
+        // The highlighted link, first.
         if let Some(url) = self.focused_link() {
-            items.insert(0, copies('u', "Link in comment", url));
+            items.insert(0, copies('u', "Highlighted link", url));
         }
         items.push(Item::new(
             'v',
@@ -122,14 +148,19 @@ impl App {
 
         // The comment being read, while reading.
         let focused = if self.focus == Focus::Reader {
-            self.current().and_then(|d| Some((d.focused()?.id, d.focused_text())))
+            self.current()
+                .and_then(|d| Some((d.focused()?.id, d.focused_text())))
         } else {
             None
         };
         let author = |cid| {
             let thread = self.threads.get(&id)?.as_ref().ok()?;
             let by = &find(thread, cid)?.by;
-            Some(if by.is_empty() { "[deleted]".to_string() } else { by.clone() })
+            Some(if by.is_empty() {
+                "[deleted]".to_string()
+            } else {
+                by.clone()
+            })
         };
         match focused {
             Some((cid, text)) => {
@@ -137,7 +168,12 @@ impl App {
                 items.push(match text {
                     Some(text) => {
                         let what = format!("{by}'s, {}", amount(&text));
-                        Item::new('c', "Comment", what.clone(), Copy::Text(text, format!("{by}'s comment")))
+                        Item::new(
+                            'c',
+                            "Comment",
+                            what.clone(),
+                            Copy::Text(text, format!("{by}'s comment")),
+                        )
                     }
                     None => Item::off('c', "Comment", "it has no text"),
                 });
@@ -150,22 +186,34 @@ impl App {
             }
         }
 
-        items.push(match self.articles.get(&id) {
-            Some(Article::Text { md, words }) => {
-                let site = url.as_deref().and_then(hn::domain).unwrap_or_default();
+        items.push(self.article_item(&Source::Story(id), url.as_deref()));
+        Some(items)
+    }
+
+    /// Copying `source`'s article, from `url`, or saying why not.
+    fn article_item(&self, source: &Source, url: Option<&str>) -> Item<Copy> {
+        match self.articles.get(source) {
+            Some(Article::Text { md, words, .. }) => {
+                let site = url.and_then(hn::domain).unwrap_or_default();
                 let what = format!("from {site}, {words} words, as Markdown");
-                Item::new('a', "Article", what, Copy::Text(md.clone(), "the article".into()))
+                Item::new(
+                    'a',
+                    "Article",
+                    what,
+                    Copy::Text(md.clone(), "the article".into()),
+                )
             }
-            Some(Article::About { .. }) => {
-                Item::off('a', "Article", "no text on the page: w opens the website in your browser")
-            }
+            Some(Article::About { .. }) => Item::off(
+                'a',
+                "Article",
+                "no text on the page: w opens the website in your browser",
+            ),
             Some(Article::Unreadable(why)) => {
                 Item::off('a', "Article", format!("couldn't be read: {why}"))
             }
             None if url.is_none() => Item::off('a', "Article", "none: it's on HN"),
             None => Item::off('a', "Article", "not read yet"),
-        });
-        Some(items)
+        }
     }
 
     /// Does what a menu item says.
@@ -185,7 +233,10 @@ impl App {
             return;
         };
         doc.select_lines(line, line);
-        self.prompt = Some(Prompt::Select { anchor: line, cursor: line });
+        self.prompt = Some(Prompt::Select {
+            anchor: line,
+            cursor: line,
+        });
     }
 
     /// Keys while selecting: more or less, copy, or not.
@@ -255,6 +306,9 @@ mod tests {
     fn says_how_much() {
         assert_eq!(amount("one two three\n"), "3 words");
         assert_eq!(amount("a\n\nb\n"), "3 lines");
-        assert_eq!(markdown_link("Ask [HN]", "https://x"), "[Ask \\[HN\\]](<https://x>)");
+        assert_eq!(
+            markdown_link("Ask [HN]", "https://x"),
+            "[Ask \\[HN\\]](<https://x>)"
+        );
     }
 }

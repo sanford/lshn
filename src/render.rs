@@ -72,7 +72,10 @@ pub fn comment_marker(id: u64, depth: usize) -> String {
 }
 
 fn parse_comment_marker(html: &str) -> Option<(u64, usize)> {
-    let rest = html.trim().strip_prefix("<!-- comment:")?.strip_suffix("-->")?;
+    let rest = html
+        .trim()
+        .strip_prefix("<!-- comment:")?
+        .strip_suffix("-->")?;
     let (id, depth) = rest.trim().split_once(' ')?;
     Some((id.parse().ok()?, depth.trim().parse().ok()?))
 }
@@ -325,7 +328,10 @@ impl Renderer<'_> {
     }
 
     fn para(&mut self, pieces: &[Piece]) {
-        for (i, line) in wrap::wrap_links(pieces, self.avail()).into_iter().enumerate() {
+        for (i, line) in wrap::wrap_links(pieces, self.avail())
+            .into_iter()
+            .enumerate()
+        {
             self.emit_wrapped(line);
             if i > 0 {
                 self.joins(Join::Space);
@@ -609,7 +615,10 @@ impl Renderer<'_> {
         if literal.trim() == SECTION_BREAK {
             let mark = "*   *   *";
             let pad = self.avail().saturating_sub(mark.len()) / 2;
-            self.emit(vec![Span::styled(format!("{}{mark}", " ".repeat(pad)), self.theme.dim())]);
+            self.emit(vec![Span::styled(
+                format!("{}{mark}", " ".repeat(pad)),
+                self.theme.dim(),
+            )]);
             self.gap();
             return;
         }
@@ -645,7 +654,11 @@ impl Renderer<'_> {
         let w = wrap::width(&label);
         let rule = if w + 8 <= avail {
             let left = (avail - w) / 2;
-            format!("{}{label}{}", "─".repeat(left), "─".repeat(avail - w - left))
+            format!(
+                "{}{label}{}",
+                "─".repeat(left),
+                "─".repeat(avail - w - left)
+            )
         } else {
             "─".repeat(avail)
         };
@@ -734,9 +747,14 @@ impl Renderer<'_> {
         let body_words: Vec<usize> = (0..ncols).map(|c| longest_word(c, false)).collect();
         let numbers: Vec<bool> = (0..ncols)
             .map(|c| {
-                let body = rows.iter().filter(|(header, _)| !header).map(|(_, cells)| &cells[c]);
+                let body = rows
+                    .iter()
+                    .filter(|(header, _)| !header)
+                    .map(|(_, cells)| &cells[c]);
                 body.clone().any(|cell| !cell.is_empty())
-                    && body.map(|cell| cell_text(cell)).all(|t| t.is_empty() || is_number(&t))
+                    && body
+                        .map(|cell| cell_text(cell))
+                        .all(|t| t.is_empty() || is_number(&t))
             })
             .collect();
         let widths = fit_columns(&natural, &head_words, &body_words, &numbers, room);
@@ -1032,7 +1050,11 @@ fn fit_columns(
     let passes: [(&[usize], Split); 3] = [(&heads, fill), (&all, fill), (natural, share)];
     for (goal, split) in passes {
         let left = room - widths.iter().sum::<usize>();
-        let want: Vec<usize> = goal.iter().zip(&widths).map(|(g, w)| g.saturating_sub(*w)).collect();
+        let want: Vec<usize> = goal
+            .iter()
+            .zip(&widths)
+            .map(|(g, w)| g.saturating_sub(*w))
+            .collect();
         for (w, extra) in widths.iter_mut().zip(split(&want, left)) {
             *w += extra;
         }
@@ -1124,7 +1146,10 @@ pub const SECTION_BREAK: &str = "<!-- section break -->";
 /// The label of a rule written as `<!-- rule: label -->`: Markdown's
 /// `---` can't carry one.
 pub fn rule_label(html: &str) -> Option<String> {
-    let label = html.trim().strip_prefix("<!-- rule:")?.strip_suffix("-->")?;
+    let label = html
+        .trim()
+        .strip_prefix("<!-- rule:")?
+        .strip_suffix("-->")?;
     Some(label.trim().to_string())
 }
 
@@ -1174,15 +1199,30 @@ mod tests {
     fn fits_columns() {
         let no = [false; 3];
         assert_eq!(fit_columns(&[3, 4], &[0, 0], &[3, 4], &no, 10), [3, 4]);
-        assert_eq!(fit_columns(&[3, 40, 40], &[0, 0, 0], &[3, 5, 5], &no, 23), [3, 10, 10]);
+        assert_eq!(
+            fit_columns(&[3, 40, 40], &[0, 0, 0], &[3, 5, 5], &no, 23),
+            [3, 10, 10]
+        );
         // The long-worded column keeps its word whole.
         assert_eq!(fit_columns(&[20, 20], &[0, 0], &[12, 3], &no, 20), [15, 5]);
         assert_eq!(fit_columns(&[5, 5], &[0, 0], &[5, 5], &no, 1), [1, 1]);
         // No room for every word: the number stays whole, the word breaks.
-        assert_eq!(fit_columns(&[15, 9], &[5, 4], &[15, 9], &[false, true], 16), [7, 9]);
+        assert_eq!(
+            fit_columns(&[15, 9], &[5, 4], &[15, 9], &[false, true], 16),
+            [7, 9]
+        );
         // Headings' words break before the cells' words; what's left over
         // keeps as many headings' words whole as it can, the shortest first.
-        assert_eq!(fit_columns(&[9, 8, 15], &[8, 8, 5], &[2, 4, 15], &[true, true, false], 17), [4, 8, 5]);
+        assert_eq!(
+            fit_columns(
+                &[9, 8, 15],
+                &[8, 8, 5],
+                &[2, 4, 15],
+                &[true, true, false],
+                17
+            ),
+            [4, 8, 5]
+        );
     }
 
     #[test]

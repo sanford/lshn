@@ -258,7 +258,11 @@ impl TextBox {
         let r = rows[to];
         let chars: Vec<char> = self.lines[r.line].chars().collect();
         // Not the row's end, where it wraps: that's the next row's start.
-        let last = if r.end < chars.len() { r.end - 1 } else { r.end };
+        let last = if r.end < chars.len() {
+            r.end - 1
+        } else {
+            r.end
+        };
         let (mut col, mut used) = (r.start, 0);
         while col < last && used + width_of(chars[col]) <= x {
             used += width_of(chars[col]);
@@ -314,7 +318,11 @@ mod tests {
     fn typed(text: &str) -> TextBox {
         let mut b = TextBox::new("");
         for c in text.chars() {
-            b.key(key(if c == '\n' { KeyCode::Enter } else { KeyCode::Char(c) }));
+            b.key(key(if c == '\n' {
+                KeyCode::Enter
+            } else {
+                KeyCode::Char(c)
+            }));
         }
         b
     }
@@ -338,8 +346,17 @@ mod tests {
     fn wraps_at_spaces_and_moves_by_rows() {
         let mut b = TextBox::new("one two three four");
         let rows = b.rows(9);
-        let text = |r: &Row| b.lines[0].chars().skip(r.start).take(r.end - r.start).collect::<String>();
-        assert_eq!(rows.iter().map(text).collect::<Vec<_>>(), ["one two ", "three ", "four"]);
+        let text = |r: &Row| {
+            b.lines[0]
+                .chars()
+                .skip(r.start)
+                .take(r.end - r.start)
+                .collect::<String>()
+        };
+        assert_eq!(
+            rows.iter().map(text).collect::<Vec<_>>(),
+            ["one two ", "three ", "four"]
+        );
         // A word too long for a row is broken.
         assert_eq!(TextBox::new("abcdefghij").rows(4).len(), 3);
         b.width = 9;

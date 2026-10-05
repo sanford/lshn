@@ -123,12 +123,20 @@ impl Comment {
     /// How many of this comment and its replies are newer than comment
     /// `seen`.
     pub fn newer_than(&self, seen: u64) -> usize {
-        usize::from(self.id > seen) + self.replies.iter().map(|r| r.newer_than(seen)).sum::<usize>()
+        usize::from(self.id > seen)
+            + self
+                .replies
+                .iter()
+                .map(|r| r.newer_than(seen))
+                .sum::<usize>()
     }
 
     /// The newest comment's id, of this one and its replies.
     pub fn newest(&self) -> u64 {
-        self.replies.iter().map(Comment::newest).fold(self.id, u64::max)
+        self.replies
+            .iter()
+            .map(Comment::newest)
+            .fold(self.id, u64::max)
     }
 
     /// How many comments this is, with all its replies.
@@ -163,7 +171,9 @@ fn get_json<T: serde::de::DeserializeOwned>(url: &str) -> Result<T, String> {
 
 /// The ids of a feed's stories, in order.
 pub fn feed(feed: Feed) -> Result<Vec<u64>, String> {
-    let endpoint = feed.endpoint().ok_or("the saved stories are kept here, not on HN")?;
+    let endpoint = feed
+        .endpoint()
+        .ok_or("the saved stories are kept here, not on HN")?;
     get_json(&format!("{FIREBASE}/{endpoint}.json"))
 }
 
@@ -347,7 +357,10 @@ pub fn replies(name: &str) -> Result<Replies, String> {
     if yours.is_empty() {
         return Ok(Replies::default());
     }
-    let parents: Vec<String> = yours.iter().map(|p| format!("parent_id={}", p.id)).collect();
+    let parents: Vec<String> = yours
+        .iter()
+        .map(|p| format!("parent_id={}", p.id))
+        .collect();
     let hits: ReplyHits = search_by_date(&[
         ("tags", "comment".into()),
         ("numericFilters", format!("({})", parents.join(","))),
@@ -380,7 +393,8 @@ struct ItemStory {
 /// The story comment `id` is on, from Algolia.
 pub fn story_of(id: u64) -> Result<u64, String> {
     let item: ItemStory = get_json(&format!("{ALGOLIA}/items/{id}"))?;
-    item.story_id.ok_or_else(|| format!("No story has item {id}"))
+    item.story_id
+        .ok_or_else(|| format!("No story has item {id}"))
 }
 
 /// What's typed or pasted to open something on HN: a link to a story, a
@@ -410,9 +424,7 @@ pub fn link(url: &str) -> Option<Link> {
     let rest = rest.strip_prefix("news.ycombinator.com/")?;
     let (page, query) = rest.split_once('?')?;
     let query = query.split('#').next().unwrap_or("");
-    let id = query
-        .split('&')
-        .find_map(|kv| kv.strip_prefix("id="))?;
+    let id = query.split('&').find_map(|kv| kv.strip_prefix("id="))?;
     match page {
         "item" => id.parse().ok().map(Link::Item),
         "user" if is_username(id) => Some(Link::User(id.to_string())),
@@ -445,7 +457,11 @@ pub fn search(query: &str) -> Result<Vec<u64>, String> {
         .limit(MAX_JSON)
         .read_json()
         .map_err(|e| e.to_string())?;
-    Ok(results.hits.iter().filter_map(|h| h.id.parse().ok()).collect())
+    Ok(results
+        .hits
+        .iter()
+        .filter_map(|h| h.id.parse().ok())
+        .collect())
 }
 
 #[derive(Deserialize)]
@@ -508,15 +524,27 @@ mod tests {
 
     #[test]
     fn knows_hn_links() {
-        assert_eq!(link("https://news.ycombinator.com/item?id=123"), Some(Link::Item(123)));
-        assert_eq!(link("http://news.ycombinator.com/item?id=9&p=2#x"), Some(Link::Item(9)));
-        assert_eq!(link("https://news.ycombinator.com/user?id=pg"), Some(Link::User("pg".into())));
+        assert_eq!(
+            link("https://news.ycombinator.com/item?id=123"),
+            Some(Link::Item(123))
+        );
+        assert_eq!(
+            link("http://news.ycombinator.com/item?id=9&p=2#x"),
+            Some(Link::Item(9))
+        );
+        assert_eq!(
+            link("https://news.ycombinator.com/user?id=pg"),
+            Some(Link::User("pg".into()))
+        );
         assert_eq!(link("https://news.ycombinator.com/user?id=a%20b"), None);
         assert_eq!(link("https://news.ycombinator.com/newest"), None);
         assert_eq!(link("https://example.com/item?id=1"), None);
         assert_eq!(parse(" 49898502 "), Some(Link::Item(49898502)));
         assert_eq!(parse("news.ycombinator.com/item?id=5"), Some(Link::Item(5)));
-        assert_eq!(parse("https://news.ycombinator.com/user?id=pg"), Some(Link::User("pg".into())));
+        assert_eq!(
+            parse("https://news.ycombinator.com/user?id=pg"),
+            Some(Link::User("pg".into()))
+        );
         assert_eq!(parse("rust async"), None);
     }
 

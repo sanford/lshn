@@ -67,6 +67,9 @@ pub struct Doc {
     link: Option<(u64, usize)>,
     /// `Esc` let go of the link, but `j` and `k` go on from it.
     link_hidden: bool,
+    /// In the article, the line `j` and `k` have taken the band to, and
+    /// which of the links starting on it.
+    band_at: Option<(usize, usize)>,
     /// Across a re-render, the row on screen the cursor's comment was on.
     cursor_row: Option<usize>,
     /// How the cursor's comment is shown, when it is.
@@ -122,6 +125,7 @@ impl Doc {
             cursor: None,
             link: None,
             link_hidden: false,
+            band_at: None,
             cursor_row: None,
             focus_style: None,
             search: None,
@@ -233,7 +237,10 @@ impl Doc {
             self.go_to_anchor(&slug);
         }
         if let (Some(row), Some(i)) = (self.cursor_row.take(), self.cursor_index()) {
-            self.top = self.comments[i].start.saturating_sub(row).min(self.max_top());
+            self.top = self.comments[i]
+                .start
+                .saturating_sub(row)
+                .min(self.max_top());
         }
         if let Some((line, query)) = self.pending_match.take() {
             self.go_to_match(line, &query);
@@ -275,7 +282,14 @@ impl Doc {
     /// Draws the rendered view into `area`, wrapped to `width` (which may be
     /// less than the area's).
     /// Links to the pages in `visited` are dimmed.
-    pub fn draw(&mut self, f: &mut Frame, area: Rect, width: usize, theme: &Theme, visited: &HashSet<String>) {
+    pub fn draw(
+        &mut self,
+        f: &mut Frame,
+        area: Rect,
+        width: usize,
+        theme: &Theme,
+        visited: &HashSet<String>,
+    ) {
         self.layout(width.max(1), theme);
         self.height = area.height.into();
         self.top = self.top.min(self.max_top());
@@ -448,15 +462,24 @@ impl Doc {
     }
 
     /// Line `i` with any search matches on it highlighted, the link `j`
-    /// and `k` are on (by id) reversed, and links already opened dimmed.
-    fn highlighted(&self, i: usize, line: &RLine, link: Option<u32>, visited: &HashSet<String>) -> RLine {
+    /// and `k` are on, or the band's on in the article (by id), reversed, and links already opened dimmed.
+    fn highlighted(
+        &self,
+        i: usize,
+        line: &RLine,
+        link: Option<u32>,
+        visited: &HashSet<String>,
+    ) -> RLine {
         let mut line = line.clone();
         if let (Some(style), Some(c)) = (self.focus_style, self.focused())
             && (c.start..c.end).contains(&i)
         {
             line.spans = focus_bars(line.spans, c.depth * 2, style.accent);
             if i == c.start {
-                line.spans.push(Span::styled("   r reply · v upvote · space fold", Style::new().dim()));
+                line.spans.push(Span::styled(
+                    "   r reply · v upvote · space fold",
+                    Style::new().dim(),
+                ));
             }
             if let Some(band) = style.band {
                 line.spans = banded(line.spans, c.depth * 2, self.width, band);
@@ -516,7 +539,10 @@ impl Doc {
     /// Whether line `i` has any text of its own, not just bars.
     fn has_text(&self, i: usize) -> bool {
         let line = &self.lines[i];
-        !self.column_text(i, line.body.0, line.body.1).trim().is_empty()
+        !self
+            .column_text(i, line.body.0, line.body.1)
+            .trim()
+            .is_empty()
     }
 
     /// The line with text `by` lines with text on from line `i`: up with a
@@ -723,15 +749,24 @@ impl Doc {
                 if let Some(s) = stops.iter_mut().find(|s| s.id == l.id) {
                     s.last = i;
                 } else if !stops.iter().any(|s| &s.url == url) {
-                    stops.push(LinkStop { id: l.id, first: i, last: i, url: url.clone() });
+                    stops.push(LinkStop {
+                        id: l.id,
+                        first: i,
+                        last: i,
+                        url: url.clone(),
+                    });
                 }
             }
         }
         stops
     }
 
-    /// The link `j` and `k` are on, in the comment the cursor's on.
+    /// The link `j` and `k` are on, in the comment the cursor's on; in the
+    /// article, the one the reading band's on.
     pub fn focused_link(&self) -> Option<LinkStop> {
+        if self.cursor.is_none() {
+            return self.band_link();
+        }
         if self.link_hidden {
             return None;
         }
@@ -741,14 +776,164 @@ impl Doc {
     }
 
     /// Back from a link to the comment it's in, `j` and `k` going on from
-    /// where it was. Returns false if no link was chosen.
+    /// where it was. Returns false if no link was chosen: the article's
+    /// band isn't let go of, it moves on as the article scrolls.
     pub fn clear_link(&mut self) -> bool {
-        let had = self.focused_link().is_some();
+        let had = self.cursor.is_some() && self.focused_link().is_some();
         self.link_hidden = true;
         had
     }
 
-    /// `j` or `k`: in the article, a line; among the comments, the next or
+    /// In the article, the link the reading band's on.
+    fn band_link(&self) -> Option<LinkStop> {
+        let (line, n) = self.band_place()?;
+        let mut stops = self.band_stops(line);
+        Some(stops.swap_remove(n.min(stops.len() - 1)))
+    }
+
+    /// Where the band's on in the article: a line with links starting on
+    /// it, and which of them. The one `j` and `k` came to, while it's near
+    /// the band; or else the line nearest it, at its first link.
+    fn band_place(&self) -> Option<(usize, usize)> {
+        let (band, near) = self.band_window()?;
+        if let Some((line, n)) = self.band_at
+            && near.contains(&line)
+            && self.starts_links(line)
+        {
+            return Some((line, n));
+        }
+        let line = near
+            .filter(|&i| self.starts_links(i))
+            .min_by_key(|&i| i.abs_diff(band))?;
+        Some((line, 0))
+    }
+
+    /// In the article, the line the band's on and the lines near enough
+    /// it to count, on screen and above the comments: all of them when the
+    /// article fits on the screen, where the band doesn't move, for `j`
+    /// and `k` to go to each link in turn.
+    fn band_window(&self) -> Option<(usize, std::ops::Range<usize>)> {
+        /// How far from the band a link can be: far enough that one
+        /// scroll never carries a link past it unseen.
+        const REACH: usize = 2;
+        let end = self.comments.first().map_or(self.lines.len(), |c| c.start);
+        let band = self.band_line(end)?;
+        let bottom = (self.top + self.height).min(end);
+        if end <= self.height {
+            return Some((band, self.top..bottom));
+        }
+        let from = self.top.max(band.saturating_sub(REACH));
+        Some((band, from..bottom.min(band + REACH + 1)))
+    }
+
+    /// Whether line `i` has links on it, links wrapped onto it from the
+    /// line above aside: those start there, or at the top of the screen.
+    fn starts_links(&self, i: usize) -> bool {
+        self.lines[i].links.iter().any(|l| self.starts_on(i, l.id))
+    }
+
+    fn starts_on(&self, i: usize, id: u32) -> bool {
+        i == self.top || !self.lines[i - 1].links.iter().any(|l| l.id == id)
+    }
+
+    /// The links starting on line `i`, in order, each page once: a
+    /// story's points, age and comments all go to its HN page.
+    fn band_stops(&self, i: usize) -> Vec<LinkStop> {
+        let bottom = (self.top + self.height).min(self.lines.len());
+        let mut stops: Vec<LinkStop> = Vec::new();
+        for l in &self.lines[i].links {
+            let url = &self.links[l.id as usize];
+            if !self.starts_on(i, l.id) || stops.iter().any(|s| s.id == l.id || &s.url == url) {
+                continue;
+            }
+            let mut last = i;
+            while last + 1 < bottom && self.lines[last + 1].links.iter().any(|m| m.id == l.id) {
+                last += 1;
+            }
+            stops.push(LinkStop {
+                id: l.id,
+                first: i,
+                last,
+                url: url.clone(),
+            });
+        }
+        stops
+    }
+
+    /// The next line of links after `from` (or before, going back) that's
+    /// near the band; from nowhere, the first (or last) of them.
+    fn next_band_line(&self, forward: bool, from: Option<usize>) -> Option<usize> {
+        let (_, near) = self.band_window()?;
+        if forward {
+            let start = from.map_or(near.start, |l| (l + 1).max(near.start));
+            (start..near.end).find(|&i| self.starts_links(i))
+        } else {
+            let end = from.map_or(near.end, |l| l.min(near.end));
+            (near.start..end).rev().find(|&i| self.starts_links(i))
+        }
+    }
+
+    /// Puts the band on line `i`: at its first link, or coming up to it,
+    /// its last.
+    fn band_onto(&mut self, i: usize, forward: bool) {
+        let n = if forward {
+            0
+        } else {
+            self.band_stops(i).len() - 1
+        };
+        self.band_at = Some((i, n));
+    }
+
+    /// `j` or `k` in the article: onto the next or previous link near the
+    /// band, along its line and then on to the next line of them, so none
+    /// is skipped. Returns false when there's none, to scroll on.
+    fn band_step(&mut self, forward: bool) -> bool {
+        let place = self.band_place();
+        if let Some((line, n)) = place {
+            let next = if forward { n + 1 } else { n.wrapping_sub(1) };
+            if next < self.band_stops(line).len() {
+                self.band_at = Some((line, next));
+                return true;
+            }
+        }
+        match self.next_band_line(forward, place.map(|p| p.0)) {
+            Some(i) => {
+                self.band_onto(i, forward);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The line the reading band's on, in an article `end` lines long. It
+    /// reads a third of the way down the screen, but starts at the top and
+    /// ends at the bottom, sliding to and from there over the first and
+    /// last screenful of scrolling, so every line passes through it.
+    fn band_line(&self, end: usize) -> Option<usize> {
+        let last = end.checked_sub(1)?;
+        let height = self.height.max(1);
+        // How far the article scrolls before its last line's at the bottom.
+        let scroll = end.saturating_sub(height);
+        let top = self.top;
+        if top >= scroll {
+            return Some(if scroll == 0 { top } else { last });
+        }
+        let row = height / 3;
+        let slide = height - 1 - row;
+        Some(if scroll < row + slide {
+            // Too short to settle: it slides the whole way.
+            top * last / scroll
+        } else if top < row {
+            top * 2
+        } else if top + slide > scroll {
+            top + row + (top + slide - scroll)
+        } else {
+            top + row
+        })
+    }
+
+    /// `j` or `k`: in the article, a line, or along a line of links in the
+    /// reading band; among the comments, the next or
     /// previous one, or in one with links, each of its links in turn
     /// instead, scrolling only as far as it takes to show it whole. One taller than
     /// the screen is scrolled through first. Scrolling goes `lines` at a
@@ -758,17 +943,34 @@ impl Doc {
         let bottom = self.top + self.height;
         self.link_hidden = false;
         let Some(i) = self.cursor_index() else {
+            // Along the line of links in the band first.
+            if self.band_step(forward) {
+                return;
+            }
             // The first comment on screen takes the cursor.
-            let first = self.comments.iter().position(|c| c.start >= self.top && c.start < bottom);
+            let first = self
+                .comments
+                .iter()
+                .position(|c| c.start >= self.top && c.start < bottom);
             match first {
                 Some(i) if forward => self.enter(i, false),
-                _ => self.scroll_by(if forward { by } else { -by }),
+                _ => {
+                    // Scrolled, the band goes on from the line it was on.
+                    let from = self.band_place().map(|p| p.0);
+                    self.scroll_by(if forward { by } else { -by });
+                    if let Some(i) = self.next_band_line(forward, from) {
+                        self.band_onto(i, forward);
+                    }
+                }
             }
             return;
         };
         let c = self.comments[i];
         let stops = self.link_stops(&c);
-        let at = self.link.filter(|l| l.0 == c.id).map(|l| l.1.min(stops.len()));
+        let at = self
+            .link
+            .filter(|l| l.0 == c.id)
+            .map(|l| l.1.min(stops.len()));
         if forward {
             // The next link not scrolled past, once it's all on screen.
             let next = (at.map_or(0, |n| n + 1)..stops.len()).find(|&n| stops[n].first >= self.top);
@@ -818,7 +1020,9 @@ impl Doc {
         let shows = |s: &LinkStop| s.first >= self.top && s.last < bottom;
         self.link = match (from_below, stops.first(), stops.last()) {
             (false, Some(first), _) if shows(first) => Some((c.id, 0)),
-            (true, _, Some(last)) => Some((c.id, stops.len() - usize::from(last.first >= self.top))),
+            (true, _, Some(last)) => {
+                Some((c.id, stops.len() - usize::from(last.first >= self.top)))
+            }
             _ => None,
         };
     }
@@ -858,13 +1062,19 @@ impl Doc {
             Some(i) if on_screen(&self.comments[i]) => {}
             None if self.comments.first().is_none_or(|c| c.start > top) => {}
             _ => {
-                let seen = self.comments.iter().find(|c| c.start >= top && c.start < bottom);
+                let seen = self
+                    .comments
+                    .iter()
+                    .find(|c| c.start >= top && c.start < bottom);
                 let here = seen.or_else(|| self.comments.iter().find(|c| on_screen(c)));
                 self.cursor = here.map(|c| c.id);
             }
         }
         // A link scrolled off screen is let go.
-        if self.focused_link().is_some_and(|s| s.first < top || s.last >= bottom) {
+        if self
+            .focused_link()
+            .is_some_and(|s| s.first < top || s.last >= bottom)
+        {
             self.link = None;
         }
     }
@@ -945,7 +1155,9 @@ impl Doc {
     }
 
     fn place_pending_comment(&mut self) {
-        let Some(id) = self.pending_comment else { return };
+        let Some(id) = self.pending_comment else {
+            return;
+        };
         let Some(c) = self.comments.iter().find(|c| c.id == id).copied() else {
             return;
         };
@@ -954,7 +1166,9 @@ impl Doc {
         self.top = c.start.saturating_sub(self.height / 4).min(self.max_top());
         let bottom = self.top + self.height;
         let first = self.link_stops(&c).into_iter().next();
-        self.link = first.filter(|s| s.first >= self.top && s.last < bottom).map(|_| (id, 0));
+        self.link = first
+            .filter(|s| s.first >= self.top && s.last < bottom)
+            .map(|_| (id, 0));
         self.link_hidden = false;
     }
 
@@ -1188,7 +1402,12 @@ pub struct FocusStyle {
 }
 
 /// `spans` with `color` behind them from column `from`, out to `width`.
-fn banded(spans: Vec<Span<'static>>, from: usize, width: usize, color: ratatui::style::Color) -> Vec<Span<'static>> {
+fn banded(
+    spans: Vec<Span<'static>>,
+    from: usize,
+    width: usize,
+    color: ratatui::style::Color,
+) -> Vec<Span<'static>> {
     let mut out: Vec<Span<'static>> = Vec::with_capacity(spans.len() + 2);
     let mut col = 0;
     for span in spans {
@@ -1203,7 +1422,11 @@ fn banded(spans: Vec<Span<'static>>, from: usize, width: usize, color: ratatui::
             let mut right = String::new();
             let mut at = col;
             for ch in span.content.chars() {
-                if at < from { left.push(ch) } else { right.push(ch) }
+                if at < from {
+                    left.push(ch)
+                } else {
+                    right.push(ch)
+                }
                 at += wrap::width(ch.encode_utf8(&mut [0; 4]));
             }
             out.push(Span::styled(left, span.style));
@@ -1231,7 +1454,8 @@ pub struct CommentSpan {
     pub end: usize,
 }
 
-/// A link in a comment's text, for `j` and `k` to stop on.
+/// A link in a comment's text, for `j` and `k` to stop on, or in the
+/// article, in the reading band.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LinkStop {
     /// Its id in the document's links.
@@ -1259,7 +1483,12 @@ fn comment_spans(marks: &[CommentMark], lines: &[RLine]) -> Vec<CommentSpan> {
             while end > m.line + 1 && lines.get(end - 1).is_some_and(blank) {
                 end -= 1;
             }
-            CommentSpan { id: m.id, depth: m.depth, start: m.line, end }
+            CommentSpan {
+                id: m.id,
+                depth: m.depth,
+                start: m.line,
+                end,
+            }
         })
         .collect()
 }
@@ -1267,7 +1496,10 @@ fn comment_spans(marks: &[CommentMark], lines: &[RLine]) -> Vec<CommentSpan> {
 /// Copied lines as text: indented only as much as they are more than the
 /// least, with no blank lines at either end or more than one together.
 fn tidy(lines: Vec<String>) -> String {
-    let lines: Vec<String> = lines.into_iter().map(|l| l.trim_end().to_string()).collect();
+    let lines: Vec<String> = lines
+        .into_iter()
+        .map(|l| l.trim_end().to_string())
+        .collect();
     let indent = lines
         .iter()
         .filter(|l| !l.is_empty())
@@ -1348,16 +1580,34 @@ mod tests {
              let code = \"a line of code that is too long to fit\";\n"
         );
         // Just the reply: indented no more than it has to be.
-        let bob = doc.lines.iter().position(|l| l.text().contains("bob")).unwrap();
-        assert!(doc.text_between((bob, 0), (bob + 3, usize::MAX)).starts_with("bob · 2h ago\n\n• a list item\n"));
+        let bob = doc
+            .lines
+            .iter()
+            .position(|l| l.text().contains("bob"))
+            .unwrap();
+        assert!(
+            doc.text_between((bob, 0), (bob + 3, usize::MAX))
+                .starts_with("bob · 2h ago\n\n• a list item\n")
+        );
         // From the middle of a line to the middle of the next.
-        let first = doc.lines.iter().position(|l| l.text().contains("A first")).unwrap();
+        let first = doc
+            .lines
+            .iter()
+            .position(|l| l.text().contains("A first"))
+            .unwrap();
         doc.selection = Some(((first + 1, 7), (first, 4)));
         let text = doc.selected_text().unwrap();
-        assert!(text.starts_with("first paragraph") && text.lines().count() == 1, "{text:?}");
+        assert!(
+            text.starts_with("first paragraph") && text.lines().count() == 1,
+            "{text:?}"
+        );
         // From partway into a comment to the reply below: the reply's no
         // more indented than it was.
-        let bob = doc.lines.iter().position(|l| l.text().contains("bob")).unwrap();
+        let bob = doc
+            .lines
+            .iter()
+            .position(|l| l.text().contains("bob"))
+            .unwrap();
         let text = doc.text_between((first, 4), (bob, usize::MAX));
         assert!(text.ends_with("lines.\n\n  bob · 2h ago\n"), "{text:?}");
     }
@@ -1368,8 +1618,16 @@ mod tests {
         let mut doc = Doc::new(md.into());
         doc.layout(30, &Theme::new(crate::theme::Mode::Dark, true, None));
         doc.height = 20;
-        let one = doc.lines.iter().position(|l| l.text().contains("one")).unwrap();
-        let two = doc.lines.iter().position(|l| l.text().contains("two")).unwrap();
+        let one = doc
+            .lines
+            .iter()
+            .position(|l| l.text().contains("one"))
+            .unwrap();
+        let two = doc
+            .lines
+            .iter()
+            .position(|l| l.text().contains("two"))
+            .unwrap();
         assert_eq!(doc.text_line(one, 1), two, "over the blank line between");
         assert_eq!(doc.text_line(two, 1), two, "no further than the end");
         doc.select_lines(two, one);
@@ -1385,7 +1643,11 @@ mod tests {
         let mut doc = Doc::new(format!("# Story\n\n*Loading…*\n\n{comments}"));
         doc.layout(40, &theme);
         doc.height = 3;
-        let second = doc.lines.iter().position(|l| l.text() == "second comment").unwrap();
+        let second = doc
+            .lines
+            .iter()
+            .position(|l| l.text() == "second comment")
+            .unwrap();
         doc.jump_to(second);
 
         let article = "A paragraph of the article.\n\n".repeat(30);
@@ -1415,9 +1677,14 @@ mod tests {
     #[test]
     fn knows_each_comments_own_lines() {
         let doc = thread();
-        let text = |c: &CommentSpan| -> Vec<String> { doc.lines[c.start..c.end].iter().map(|l| l.text()).collect() };
+        let text = |c: &CommentSpan| -> Vec<String> {
+            doc.lines[c.start..c.end].iter().map(|l| l.text()).collect()
+        };
         let spans = &doc.comments;
-        assert_eq!(spans.iter().map(|c| (c.id, c.depth)).collect::<Vec<_>>(), [(1, 0), (2, 1), (3, 0)]);
+        assert_eq!(
+            spans.iter().map(|c| (c.id, c.depth)).collect::<Vec<_>>(),
+            [(1, 0), (2, 1), (3, 0)]
+        );
         assert_eq!(text(&spans[0]), ["│ bob", "│", "│ first line"]);
         assert_eq!(text(&spans[1]), ["│ │ alice", "│ │", "│ │ reply"]);
     }
@@ -1450,8 +1717,12 @@ mod tests {
     fn long_thread() -> Doc {
         use crate::render::comment_marker;
         let theme = Theme::plain();
-        let article = (1..=6).map(|n| format!("article {n}\n\n")).collect::<String>();
-        let long = (1..=8).map(|n| format!("> long {n}\n>\n")).collect::<String>();
+        let article = (1..=6)
+            .map(|n| format!("article {n}\n\n"))
+            .collect::<String>();
+        let long = (1..=8)
+            .map(|n| format!("> long {n}\n>\n"))
+            .collect::<String>();
         let md = format!(
             "{article}{}\n\n> ### a\n>\n> short\n\n{}\n\n> ### b\n>\n{long}\n{}\n\n> ### c\n>\n> last\n",
             comment_marker(1, 0),
@@ -1479,7 +1750,10 @@ mod tests {
         }
         assert_eq!(id(&doc), Some(1));
         let a = doc.comments[0];
-        assert!(a.start >= doc.top && a.end <= doc.top + doc.height, "all of it shows");
+        assert!(
+            a.start >= doc.top && a.end <= doc.top + doc.height,
+            "all of it shows"
+        );
         // To the long one: its top shows, and j reads down through it
         // before moving on.
         doc.step(true, 1);
@@ -1525,7 +1799,10 @@ mod tests {
 
     /// Where `j` and `k` are: the comment, and the link if on one.
     fn stop(doc: &Doc) -> (Option<u64>, Option<String>) {
-        (doc.focused().map(|c| c.id), doc.focused_link().map(|l| l.url))
+        (
+            doc.focused().map(|c| c.id),
+            doc.focused_link().map(|l| l.url),
+        )
     }
 
     #[test]
@@ -1533,7 +1810,14 @@ mod tests {
         let mut doc = linked_thread(40);
         let stops = doc.link_stops(&doc.comments[0]);
         let urls: Vec<&str> = stops.iter().map(|s| s.url.as_str()).collect();
-        assert_eq!(urls, ["https://youtube.com/watch?v=a", "https://youtube.com/watch?v=b"], "not the header's, nor one twice");
+        assert_eq!(
+            urls,
+            [
+                "https://youtube.com/watch?v=a",
+                "https://youtube.com/watch?v=b"
+            ],
+            "not the header's, nor one twice"
+        );
         assert!(stops[1].last > stops[1].first, "the second wraps");
         let some = |id: u64, url: Option<&str>| (Some(id), url.map(String::from));
         // A comment with links is each of them in turn; one without, itself.
@@ -1575,6 +1859,155 @@ mod tests {
         assert_eq!(stop(&doc), some(2, None));
     }
 
+    /// An article with a link every few lines, the first in its first
+    /// line and the last in its last, and no comments.
+    fn linked_article(height: usize) -> (Doc, Vec<String>) {
+        let theme = Theme::plain();
+        let urls: Vec<String> = (0..12)
+            .map(|n| format!("https://example.com/{n}"))
+            .collect();
+        let md: Vec<String> = urls
+            .iter()
+            .enumerate()
+            .map(|(n, url)| format!("[link {n}](<{url}>)\n\nfiller\n\nmore filler"))
+            .collect();
+        let mut md = md.join("\n\n");
+        md.push_str("\n\n[end](<https://example.com/end>)\n");
+        let mut urls = urls;
+        urls.push("https://example.com/end".into());
+        let mut doc = Doc::new(md);
+        doc.layout(30, &theme);
+        doc.height = height;
+        (doc, urls)
+    }
+
+    /// The links the band's on, in turn, scrolling `by` at a time to the
+    /// end, or with `by` negative, the top.
+    fn band_links(doc: &mut Doc, by: isize) -> Vec<String> {
+        let mut seen: Vec<String> = Vec::new();
+        loop {
+            if let Some(l) = doc.focused_link() {
+                assert!(
+                    l.first >= doc.top && l.last < doc.top + doc.height,
+                    "{l:?} on screen"
+                );
+                if seen.last() != Some(&l.url) {
+                    seen.push(l.url);
+                }
+            }
+            if doc.top == if by > 0 { doc.max_top() } else { 0 } {
+                return seen;
+            }
+            doc.scroll_by(by);
+        }
+    }
+
+    #[test]
+    fn the_band_comes_to_every_link_in_the_article_as_it_scrolls() {
+        for by in [1, 2] {
+            let (mut doc, urls) = linked_article(10);
+            assert!(doc.max_top() > 20, "scrolls a good way");
+            assert_eq!(
+                doc.focused_link().map(|l| l.url).as_ref(),
+                Some(&urls[0]),
+                "the first at the top"
+            );
+            assert_eq!(band_links(&mut doc, by), urls, "scrolling {by} at a time");
+            // And back up: each again, the other way.
+            let mut up = band_links(&mut doc, -by);
+            up.reverse();
+            assert_eq!(up, urls, "scrolling back {by} at a time");
+        }
+        // Esc doesn't let go of it: it's just where you're reading.
+        let (mut doc, urls) = linked_article(10);
+        assert!(!doc.clear_link());
+        assert_eq!(doc.focused_link().map(|l| l.url).as_ref(), Some(&urls[0]));
+    }
+
+    #[test]
+    fn j_and_k_go_to_every_link_in_an_article_that_fits() {
+        let (mut doc, urls) = linked_article(200);
+        let url = |doc: &Doc| doc.focused_link().map(|l| l.url);
+        let mut seen = vec![url(&doc).unwrap()];
+        for _ in 1..urls.len() {
+            doc.step(true, 2);
+            seen.push(url(&doc).unwrap());
+        }
+        assert_eq!(seen, urls);
+        doc.step(false, 2);
+        assert_eq!(url(&doc).as_ref(), urls.iter().rev().nth(1));
+    }
+
+    #[test]
+    fn j_and_k_go_along_a_line_of_links_in_the_band() {
+        // Side by side, and wrapped to a line each.
+        for width in [100, 30] {
+            band_steps_to_every_link(width);
+        }
+    }
+
+    fn band_steps_to_every_link(width: usize) {
+        let theme = Theme::plain();
+        // Lines of one link and of three, between filler.
+        let mut md = String::new();
+        let mut urls = Vec::new();
+        for n in 0..8 {
+            let line: Vec<String> = (0..if n % 2 == 0 { 3 } else { 1 })
+                .map(|k| {
+                    let url = format!("https://example.com/{n}/{k}");
+                    urls.push(url.clone());
+                    format!("[l{n}{k}](<{url}>)")
+                })
+                .collect();
+            md.push_str(&format!(
+                "{}\n\nfiller\n\nmore\n\nand more\n\n",
+                line.join(" ")
+            ));
+        }
+        let mut doc = Doc::new(md);
+        doc.layout(width, &theme);
+        doc.height = 10;
+        assert_eq!(doc.lines[0].links.len(), if width > 90 { 3 } else { 1 });
+        let url = |doc: &Doc| doc.focused_link().map(|l| l.url);
+        // Down: every link, each once, in order.
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            if let Some(u) = url(&doc)
+                && seen.last() != Some(&u)
+            {
+                seen.push(u);
+            }
+            doc.step(true, 2);
+        }
+        assert_eq!(doc.top, doc.max_top(), "came to the end");
+        assert_eq!(seen, urls);
+        // And up: each again, the other way.
+        let mut seen = Vec::new();
+        for _ in 0..200 {
+            if let Some(u) = url(&doc)
+                && seen.last() != Some(&u)
+            {
+                seen.push(u);
+            }
+            doc.step(false, 2);
+        }
+        assert_eq!(doc.top, 0, "came to the top");
+        seen.reverse();
+        assert_eq!(seen, urls);
+    }
+
+    #[test]
+    fn the_band_stays_in_the_article_above_the_comments() {
+        let mut doc = linked_thread(6);
+        // Down to just above the comments: never a link in them.
+        while doc.comments[0].start > doc.top {
+            if let Some(l) = doc.focused_link() {
+                assert!(l.last < doc.comments[0].start, "{l:?} in the comments");
+            }
+            doc.scroll_by(1);
+        }
+    }
+
     #[test]
     fn links_below_the_screen_are_scrolled_to_and_off_it_let_go() {
         let mut doc = linked_thread(3);
@@ -1588,7 +2021,10 @@ mod tests {
             doc.follow_view();
             assert!(doc.top < 40, "never moves on");
             if let Some(l) = doc.focused_link() {
-                assert!(l.first >= doc.top && l.last < doc.top + doc.height, "{l:?} on screen");
+                assert!(
+                    l.first >= doc.top && l.last < doc.top + doc.height,
+                    "{l:?} on screen"
+                );
                 if picked.last() != Some(&l.url) {
                     picked.push(l.url);
                 }
@@ -1601,7 +2037,10 @@ mod tests {
             doc.step(false, 1);
             assert!(doc.top > 0, "never comes to it");
         }
-        assert_eq!(doc.focused_link().map(|l| l.url).as_deref(), Some("https://youtube.com/watch?v=b"));
+        assert_eq!(
+            doc.focused_link().map(|l| l.url).as_deref(),
+            Some("https://youtube.com/watch?v=b")
+        );
         // Scrolled away, the link isn't chosen any more.
         doc.scroll_by(-3);
         doc.follow_view();
@@ -1621,12 +2060,20 @@ mod tests {
     #[test]
     fn the_focused_comments_bars_stand_out() {
         let accent = Style::new().bold();
-        let spans = vec![Span::raw("│ "), Span::raw("│ "), Span::raw("reply │ not a bar")];
+        let spans = vec![
+            Span::raw("│ "),
+            Span::raw("│ "),
+            Span::raw("reply │ not a bar"),
+        ];
         let focused = focus_bars(spans, 2, accent);
         let text: String = focused.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(text, "│ ┃ reply │ not a bar");
         // Both bars in the accent; nothing in the text.
-        let styled: Vec<&str> = focused.iter().filter(|s| s.style == accent).map(|s| s.content.as_ref()).collect();
+        let styled: Vec<&str> = focused
+            .iter()
+            .filter(|s| s.style == accent)
+            .map(|s| s.content.as_ref())
+            .collect();
         assert_eq!(styled, ["│", "┃"]);
         // A top-level comment's: only its own, even with more drawn.
         let text: String = focus_bars(vec![Span::raw("│ │ x")], 0, accent)

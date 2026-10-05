@@ -17,10 +17,51 @@ const NOT_ARTICLES: &[(&str, &str)] = &[
     ("twitter.com", "a post on X"),
 ];
 
+/// Whose article it is: a story's, from its link, or a page's, followed to
+/// from one.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Source {
+    Story(u64),
+    Page(String),
+}
+
+impl Source {
+    /// Its name in the cache: the story's id, or a page's address, hashed.
+    pub fn key(&self) -> String {
+        match self {
+            Source::Story(id) => id.to_string(),
+            Source::Page(url) => format!("page-{:016x}", fnv(url)),
+        }
+    }
+}
+
+/// FNV-1a: a hash that's the same from run to run, for naming files.
+fn fnv(s: &str) -> u64 {
+    s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+/// Sites whose pages are players or apps, so there's no reading them here:
+/// what they are, if `url` is on one.
+pub fn not_article(url: &str) -> Option<&'static str> {
+    let domain = hn::domain(url).unwrap_or_default();
+    NOT_ARTICLES
+        .iter()
+        .find(|(site, _)| domain == *site || domain.ends_with(&format!(".{site}")))
+        .map(|(_, what)| *what)
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Article {
-    /// The article's text as Markdown, and how many words it has.
-    Text { md: String, words: usize },
+    /// The article's text as Markdown, how many words it has, and its title
+    /// (empty if it has none, or was cached before titles were kept).
+    Text {
+        md: String,
+        words: usize,
+        #[serde(default)]
+        title: String,
+    },
     /// Why there's nothing to show: "a PDF", "a video", an error.
     Unreadable(String),
     /// A page with no text to pull out, and what it says about itself
@@ -40,12 +81,8 @@ impl Article {
 }
 
 pub fn fetch(url: &str) -> Article {
-    let domain = hn::domain(url).unwrap_or_default();
-    if let Some((_, what)) = NOT_ARTICLES
-        .iter()
-        .find(|(site, _)| domain == *site || domain.ends_with(&format!(".{site}")))
-    {
-        return Article::Unreadable((*what).into());
+    if let Some(what) = not_article(url) {
+        return Article::Unreadable(what.into());
     }
     match fetch_html(url) {
         Ok(html) => extract(&html, url),
@@ -99,16 +136,24 @@ pub fn extract(html: &str, url: &str) -> Article {
     let html = tidy_emphasis(&unhide_streamed(html));
     let doc = Document::from(&*html);
     even_tables(&doc);
-    let parsed = Readability::with_document(doc, Some(url), Some(config)).and_then(|mut r| r.parse());
-    let md = match parsed {
-        Ok(article) => section_breaks(&drop_metadata(article.text_content.trim())),
-        Err(_) => String::new(),
+    let parsed =
+        Readability::with_document(doc, Some(url), Some(config)).and_then(|mut r| r.parse());
+    let (md, title) = match parsed {
+        Ok(article) => (
+            section_breaks(&drop_metadata(article.text_content.trim())),
+            article
+                .title
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
+        ),
+        Err(_) => Default::default(),
     };
     if md.is_empty() {
         return about(&html, url);
     }
     let words = md.split_whitespace().count();
-    Article::Text { md, words }
+    Article::Text { md, words, title }
 }
 
 /// A page with no article on it: what it says about itself, or else that
@@ -260,7 +305,10 @@ fn tidy_emphasis(html: &str) -> String {
 fn section_breaks(md: &str) -> String {
     md.split("\n\n")
         .map(|block| {
-            let marks: String = block.chars().filter(|c| !c.is_whitespace() && *c != '\\').collect();
+            let marks: String = block
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '\\')
+                .collect();
             let asterisks = marks.len() >= 3 && marks.chars().all(|c| c == '*');
             if asterisks || marks == "⁂" {
                 crate::render::SECTION_BREAK
@@ -282,8 +330,7 @@ fn drop_metadata(md: &str) -> String {
         let signals = metadata_signals(block);
         // Sentences end like sentences; lines of metadata don't.
         let sentence = block.trim_end().ends_with(['.', '!', '?', ':']);
-        let metadata =
-            !sentence && ((words <= 40 && signals >= 2) || (words <= 8 && signals >= 1));
+        let metadata = !sentence && ((words <= 40 && signals >= 2) || (words <= 8 && signals >= 1));
         if !metadata || block.trim_start().starts_with('#') {
             break;
         }
@@ -326,7 +373,9 @@ fn has_date(text: &str) -> bool {
         let parts: Vec<&str> = w.split('-').collect();
         parts.len() == 3
             && parts[0].len() == 4
-            && parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
     };
     words.iter().any(|w| iso(w))
         || words.windows(2).any(|pair| {
@@ -374,7 +423,7 @@ mod tests {
              <article><h1>Title</h1><p>{para}</p><h2>Part two</h2><p>{para}</p></article>\
              <footer>© 2026</footer></body></html>"
         );
-        let Article::Text { md, words } = extract(&html, "https://example.com/post") else {
+        let Article::Text { md, words, .. } = extract(&html, "https://example.com/post") else {
             panic!("no text");
         };
         assert!(md.contains("Part two"), "{md}");
@@ -419,7 +468,8 @@ mod tests {
 
     #[test]
     fn drops_what_pages_say_about_themselves_at_the_start() {
-        let body = "If we think writing code is dead, the bigger problem is teams not knowing the system.";
+        let body =
+            "If we think writing code is dead, the bigger problem is teams not knowing the system.";
         let md = format!(
             "Last updatedUpdated: Sep 28, 2026 · CreatedCreated: Sep 26, 2026 · 4 min read recently updated Recent changes Sep 28today published · 882 words\n\n5 min read\n\n{body}\n\nUpdated 2026-09-28 later on stays."
         );
@@ -456,19 +506,34 @@ mod tests {
             <body><div id="root"></div></body></html>"#;
         match extract(shell, url) {
             Article::About { scripted: true, md } => {
-                assert!(md.contains("(<https://example.com/blog/post/cover.jpg>)"), "{md}");
+                assert!(
+                    md.contains("(<https://example.com/blog/post/cover.jpg>)"),
+                    "{md}"
+                );
                 assert!(md.contains("A tale \\& more"), "{md}");
             }
             other => panic!("{other:?}"),
         }
         // No scripts, just tags: said, but not blamed on scripts.
         let tags = r#"<html><head><meta name="description" content="About it"></head><body><p>Hi.</p></body></html>"#;
-        assert!(matches!(extract(tags, url), Article::About { scripted: false, .. } | Article::Text { .. }));
+        assert!(matches!(
+            extract(tags, url),
+            Article::About {
+                scripted: false,
+                ..
+            } | Article::Text { .. }
+        ));
         // Nothing at all.
         let empty = "<html><body></body></html>";
         assert!(matches!(extract(empty, url), Article::Unreadable(_)));
-        assert_eq!(absolute(url, "//cdn.x/a.png").as_deref(), Some("https://cdn.x/a.png"));
-        assert_eq!(absolute(url, "c.jpg").as_deref(), Some("https://example.com/blog/c.jpg"));
+        assert_eq!(
+            absolute(url, "//cdn.x/a.png").as_deref(),
+            Some("https://cdn.x/a.png")
+        );
+        assert_eq!(
+            absolute(url, "c.jpg").as_deref(),
+            Some("https://example.com/blog/c.jpg")
+        );
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use super::menu;
 use super::picker::{Outcome, Picker, Target};
 use super::{App, Asked, Focus};
+use crate::article::Source;
 use crate::doc::Doc;
 use crate::fetch::Job;
 use crate::hn::{self, Link};
@@ -26,20 +27,32 @@ pub enum Prompt {
     },
     /// Choosing a link by its hint letters, to follow it, or to upvote or
     /// reply to the story or comment it's to.
-    Hints { typed: String, purpose: Purpose },
+    Hints {
+        typed: String,
+        purpose: Purpose,
+    },
     /// The outline or the themes.
     Pick(Picker),
     /// Typing a search of all of HN's stories.
-    SearchHn { query: String },
+    SearchHn {
+        query: String,
+    },
     /// Logging in: the username, then the password.
-    LoginUser { user: String },
-    LoginPassword { user: String, password: String },
+    LoginUser {
+        user: String,
+    },
+    LoginPassword {
+        user: String,
+        password: String,
+    },
     /// The passphrase for the login's file, where there's no keyring.
     Passphrase {
         text: String,
         purpose: super::act::Passphrase,
     },
-    Logout { user: String },
+    Logout {
+        user: String,
+    },
     /// A reply being written, in its box.
     Compose(Box<super::act::Compose>),
     /// Confirming opening something outside lshn.
@@ -47,7 +60,10 @@ pub enum Prompt {
     /// What to copy.
     Menu(super::menu::Menu<super::copy::Copy>),
     /// Selecting lines to copy, from `anchor` to `cursor`.
-    Select { anchor: usize, cursor: usize },
+    Select {
+        anchor: usize,
+        cursor: usize,
+    },
 }
 
 /// What choosing a hinted link does.
@@ -61,7 +77,18 @@ pub enum Purpose {
 /// A page to go back to, and the line that was at the top of the screen.
 pub enum Back {
     Story { id: u64, top: usize },
-    User { name: String, top: usize },
+    Page { page: Page, top: usize },
+}
+
+/// A page the reader shows in place of a story.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Page {
+    /// Someone's page on HN.
+    User(String),
+    /// The replies to you.
+    Replies,
+    /// A web page followed to, read as an article: its address.
+    Web(String),
 }
 
 /// Letters for link hints, easiest to reach first.
@@ -259,7 +286,7 @@ impl App {
             },
             Prompt::Select { anchor, cursor } => {
                 self.select_key(key, anchor, cursor);
-            },
+            }
         }
         false
     }
@@ -299,11 +326,21 @@ impl App {
         }
     }
 
-    /// Follows a link: to a heading in the story, to a story or someone's
-    /// page on HN (shown here), or (after asking) to the browser.
+    /// Follows a link, all shown here: to a heading in the story, to a
+    /// story or someone's page on HN, or to a web page, read as an article.
     pub(super) fn follow(&mut self, url: &str) {
         if let Some(link) = hn::link(url) {
             return self.open_hn(link);
+        }
+        // The story's own link: its article's already here.
+        let own = self.page.is_none()
+            && self
+                .current_key()
+                .and_then(|(id, _)| self.stories.get(&id)?.url.as_deref())
+                .is_some_and(|own| own == url);
+        if own {
+            self.flash = Some("That's the article here: w opens it in the browser".into());
+            return;
         }
         let Some(doc) = self.current() else { return };
         match render::local_path(url) {
@@ -317,7 +354,7 @@ impl App {
                 }
             }
             Some(path) => self.flash = Some(format!("Not a web link: {path}")),
-            None => self.open_outside(url),
+            None => self.open_web(url),
         }
     }
 
@@ -340,8 +377,8 @@ impl App {
                 self.open_comment(story, id);
             }
             Link::Item(id) => {
-                let on_screen = self.user_page.is_none()
-                    && self.current_key().is_some_and(|(shown, _)| shown == id);
+                let on_screen =
+                    self.page.is_none() && self.current_key().is_some_and(|(shown, _)| shown == id);
                 if on_screen {
                     if let Some(doc) = self.current()
                         && let Some(line) = super::comments_line(doc)
@@ -363,9 +400,8 @@ impl App {
     /// Opens story `story` at comment `comment`: in place, if it's the
     /// one being read.
     pub(super) fn open_comment(&mut self, story: u64, comment: u64) {
-        let reading = self.focus == Focus::Reader
-            && self.user_page.is_none()
-            && self.reading == Some(story);
+        let reading =
+            self.focus == Focus::Reader && self.page.is_none() && self.reading == Some(story);
         if reading {
             self.flash = None;
             self.doc((story, false)).go_to_comment(comment);
@@ -387,9 +423,9 @@ impl App {
             return None;
         }
         let top = self.current()?.top();
-        Some(match (&self.user_page, self.reading) {
-            (Some(name), _) => Back::User {
-                name: name.clone(),
+        Some(match (&self.page, self.reading) {
+            (Some(page), _) => Back::Page {
+                page: page.clone(),
                 top,
             },
             (None, Some(id)) => Back::Story { id, top },
@@ -403,36 +439,68 @@ impl App {
             Some(here) => self.history.push(here),
             None => self.history.clear(),
         }
-        self.user_page = None;
+        self.page = None;
         self.start_reading(id);
         self.focus = Focus::Reader;
         self.doc((id, false)).jump_to(0);
     }
 
-    /// Shows someone's page, with Esc coming back here.
-    fn open_user(&mut self, name: String) {
+    /// Shows `page` in the reader, at its top, with Esc coming back here.
+    pub(super) fn open_page(&mut self, page: Page) {
         match self.here() {
             Some(here) => self.history.push(here),
             None => self.history.clear(),
         }
         self.focus = Focus::Reader;
-        self.user_page = Some(name.clone());
-        self.user_doc(&name).jump_to(0);
+        self.page = Some(page.clone());
+        self.page_doc(&page).jump_to(0);
+    }
+
+    /// Shows someone's page.
+    fn open_user(&mut self, name: String) {
+        self.open_page(Page::User(name.clone()));
         // Fetched afresh each time: it's who they are now that's wanted.
         self.send(Job::User(name), true);
     }
 
-    /// Someone's page as a document, made the first time it's needed.
-    pub(super) fn user_doc(&mut self, name: &str) -> &mut Doc {
-        if !self.user_docs.contains_key(name) {
-            let md = if name == super::REPLIES {
-                self.replies_markdown()
-            } else {
-                crate::story::user_markdown(name, self.users.get(name), super::now())
-            };
-            self.user_docs.insert(name.to_string(), Doc::new(md));
+    /// Reads web page `url` here, as an article, as a story's is read.
+    /// Pages that are players or apps open in the browser instead.
+    pub(super) fn open_web(&mut self, url: &str) {
+        if crate::article::not_article(url).is_some() {
+            return self.open_outside_now(url);
         }
-        self.user_docs.get_mut(name).unwrap()
+        self.visited.insert(url.to_string());
+        self.open_page(Page::Web(url.to_string()));
+        let source = Source::Page(url.to_string());
+        self.ask(
+            Asked::Article(source.clone()),
+            Job::Article(source, url.to_string()),
+            true,
+        );
+    }
+
+    /// A page as a document, made the first time it's needed.
+    pub(super) fn page_doc(&mut self, page: &Page) -> &mut Doc {
+        if !self.page_docs.contains_key(page) {
+            let md = self.page_markdown(page);
+            self.page_docs.insert(page.clone(), Doc::new(md));
+        }
+        self.page_docs.get_mut(page).unwrap()
+    }
+
+    /// A page's Markdown, with what's been fetched for it.
+    pub(super) fn page_markdown(&self, page: &Page) -> String {
+        match page {
+            Page::User(name) => {
+                crate::story::user_markdown(name, self.users.get(name), super::now())
+            }
+            Page::Replies => self.replies_markdown(),
+            Page::Web(url) => {
+                let source = Source::Page(url.clone());
+                let pictures = |i| self.figures.get(&(source.clone(), i));
+                crate::story::page_markdown(url, self.articles.get(&source), &pictures)
+            }
+        }
     }
 
     /// Goes back to where the last link was followed from. Returns false
@@ -443,13 +511,13 @@ impl App {
         };
         match back {
             Back::Story { id, top } => {
-                self.user_page = None;
+                self.page = None;
                 self.start_reading(id);
                 self.doc((id, false)).jump_to(top);
             }
-            Back::User { name, top } => {
-                self.user_page = Some(name.clone());
-                self.user_doc(&name).jump_to(top);
+            Back::Page { page, top } => {
+                self.page_doc(&page).jump_to(top);
+                self.page = Some(page);
             }
         }
         true
@@ -495,8 +563,12 @@ impl App {
             Prompt::Hints { typed, purpose } => Line::from(vec![
                 match purpose {
                     Purpose::Follow => " Follow link: ".bold(),
-                    Purpose::Upvote => " Upvote (a comment's age, or the story's comments link): ".bold(),
-                    Purpose::Reply => " Reply to (a comment's age, or the story's comments link): ".bold(),
+                    Purpose::Upvote => {
+                        " Upvote (a comment's age, or the story's comments link): ".bold()
+                    }
+                    Purpose::Reply => {
+                        " Reply to (a comment's age, or the story's comments link): ".bold()
+                    }
                 },
                 Span::raw(format!("type its letters {typed}")),
                 "  esc cancels".dim(),

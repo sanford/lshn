@@ -11,7 +11,7 @@ mod outline;
 mod picker;
 mod themes;
 
-use crate::article::Article;
+use crate::article::{Article, Source};
 use crate::doc::Doc;
 use crate::fetch::{self, Done, Fetcher, Got, Job, Waiting};
 use crate::hn::{Comment, Feed, Story, User};
@@ -23,7 +23,9 @@ use crate::{safe, wrap};
 use image::DynamicImage;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind};
+use ratatui::crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEventKind,
+};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
@@ -83,10 +85,6 @@ pub struct Settings {
 
 /// A symbol no cell drawn has: see `frame`.
 const NOT_ON_SCREEN: &str = "\u{FFFF}";
-
-/// The replies to you, shown in the reader in place of someone's page: not
-/// a username, which has no spaces.
-pub(super) const REPLIES: &str = " replies";
 
 pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
     // Previewing `auto` in the theme picker needs the terminal's background,
@@ -163,8 +161,8 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
 /// lost. tmux passes on neither the question nor pictures, unless set up
 /// to, so there it's half blocks without asking.
 fn picker() -> Option<Picker> {
-    use ratatui_image::picker::{Capability, ProtocolType};
     use ratatui_image::picker::cap_parser::QueryStdioOptions;
+    use ratatui_image::picker::{Capability, ProtocolType};
     if std::env::var_os("TMUX").is_some() {
         return Some(Picker::halfblocks());
     }
@@ -192,7 +190,11 @@ fn picker() -> Option<Picker> {
         // ones draw Kitty's, sent once and then only placed, so they move
         // with the text; in older ones, its own are what it draws best.
         let kitty = picker.capabilities().contains(&Capability::Kitty);
-        picker.set_protocol_type(if kitty { ProtocolType::Kitty } else { ProtocolType::Iterm2 });
+        picker.set_protocol_type(if kitty {
+            ProtocolType::Kitty
+        } else {
+            ProtocolType::Iterm2
+        });
     } else if picker.protocol_type() == ProtocolType::Iterm2
         && program.is_some_and(|p| !ITERM_LIKE.iter().any(|t| p.contains(t)))
     {
@@ -207,7 +209,9 @@ fn picker() -> Option<Picker> {
 /// variable of its own: then TERM_PROGRAM may be another's, inherited.
 fn own_term() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
-    ["kitty", "ghostty", "wezterm"].iter().any(|t| term.contains(t))
+    ["kitty", "ghostty", "wezterm"]
+        .iter()
+        .any(|t| term.contains(t))
         || std::env::var_os("KITTY_WINDOW_ID").is_some()
 }
 
@@ -260,6 +264,17 @@ fn set_mouse(used: bool, on: bool) {
     }
 }
 
+/// What a click in the header does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HeaderHit {
+    /// `lshn`: back to the list.
+    Home,
+    /// A tab: what its key does.
+    Key(char),
+    /// `esc Back`: back where the last link was followed from.
+    Back,
+}
+
 #[derive(PartialEq, Eq)]
 enum Focus {
     List,
@@ -267,13 +282,13 @@ enum Focus {
 }
 
 /// What's been asked of the fetcher, so nothing's asked twice.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 enum Asked {
     Feed(Feed),
     Story(u64),
     Thread(u64),
-    Article(u64),
-    Figure(u64, usize),
+    Article(Source),
+    Figure(Source, usize),
 }
 
 /// A story that passes the filter, with the positions of the matched
@@ -328,31 +343,31 @@ struct App {
     replies_seen: u64,
     replies_mark: u64,
     threads: HashMap<u64, Result<Vec<Comment>, String>>,
-    articles: HashMap<u64, Article>,
-    /// Articles' pictures, by story and place in the article.
-    figures: HashMap<(u64, usize), DynamicImage>,
-    /// Stories whose every picture has been asked for, not just the first.
-    pictured: HashSet<u64>,
+    articles: HashMap<Source, Article>,
+    /// Articles' pictures, by whose article and place in it.
+    figures: HashMap<(Source, usize), DynamicImage>,
+    /// Articles whose every picture has been asked for, not just the first.
+    pictured: HashSet<Source>,
     /// Comments folded to their header, by id.
     folded: HashSet<u64>,
     /// How the terminal draws pictures, once asked; `None` if it isn't to.
     picker: Option<Picker>,
     /// The story's pictures made ready to draw, by story, picture, columns
     /// and rows.
-    drawn: HashMap<(u64, usize, usize, usize), crate::figure::Drawn>,
+    drawn: HashMap<(Source, usize, usize, usize), crate::figure::Drawn>,
     /// Pictures to send the terminal, or free, after this frame.
     to_send: Vec<String>,
     /// Where the pictures were last put (story, how far it's scrolled),
     /// and when they moved.
-    figure_at: Option<(u64, usize)>,
+    figure_at: Option<(Source, usize)>,
     figure_moved: Option<Instant>,
     /// Moving fast: an older iTerm2's pictures are soft till it stops.
     figure_moving: bool,
     docs: HashMap<DocKey, Doc>,
     users: HashMap<String, Result<User, String>>,
-    user_docs: HashMap<String, Doc>,
-    /// Someone's page, shown in the reader in place of the story.
-    user_page: Option<String>,
+    page_docs: HashMap<nav::Page, Doc>,
+    /// A page shown in the reader in place of the story.
+    page: Option<nav::Page>,
     /// Where following links came from, to go back to.
     history: Vec<nav::Back>,
     /// Pages opened in the browser this time, whose links are dimmed.
@@ -396,9 +411,9 @@ struct App {
     /// The story selected when the reader was left for the list.
     left_on: Option<u64>,
     /// What clicking the header does, at the last draw: its row, and the
-    /// columns of `lshn` (`None`: back to the list) and of each tab, with
-    /// its key.
-    header_hits: (u16, Vec<(u16, u16, Option<char>)>),
+    /// columns of `lshn`, of each tab and of `esc Back`, with what each
+    /// does.
+    header_hits: (u16, Vec<(u16, u16, HeaderHit)>),
     /// Whether a story's been chosen in the list since it opened: till
     /// then, a newer list (fetched, after the cached one) starts at the top.
     chose: bool,
@@ -482,8 +497,8 @@ impl App {
             figure_moving: false,
             docs: HashMap::new(),
             users: HashMap::new(),
-            user_docs: HashMap::new(),
-            user_page: None,
+            page_docs: HashMap::new(),
+            page: None,
             history: Vec::new(),
             opening: None,
             opening_at: None,
@@ -558,7 +573,10 @@ impl App {
                     Event::Mouse(m) => {
                         // A press or the wheel, not the button coming up
                         // after a click, which would clear what it said.
-                        if !matches!(m.kind, MouseEventKind::Up(_) | MouseEventKind::Moved | MouseEventKind::Drag(_)) {
+                        if !matches!(
+                            m.kind,
+                            MouseEventKind::Up(_) | MouseEventKind::Moved | MouseEventKind::Drag(_)
+                        ) {
                             self.flash = None;
                         }
                         self.mouse(m);
@@ -609,7 +627,11 @@ impl App {
 
     /// Gives the terminal back as it was while `f` runs, then takes it
     /// again. Its pictures are gone with the screen: they're sent again.
-    fn hand_over<T>(&mut self, terminal: &mut DefaultTerminal, f: impl FnOnce() -> T) -> io::Result<T> {
+    fn hand_over<T>(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        f: impl FnOnce() -> T,
+    ) -> io::Result<T> {
         set_mouse(self.mouse_on, false);
         set_paste(false);
         ratatui::restore();
@@ -793,10 +815,7 @@ impl App {
                     if !(failed && matches!(self.users.get(&name), Some(Ok(_)))) {
                         self.users.insert(name.clone(), result);
                     }
-                    let md = story::user_markdown(&name, self.users.get(&name), now());
-                    if let Some(doc) = self.user_docs.get_mut(&name) {
-                        doc.replace(md);
-                    }
+                    self.rebuild_page(&nav::Page::User(name));
                 }
                 Got::Replies(name, result) => {
                     if self.replies_for.as_ref().is_some_and(|n| *n != name) {
@@ -816,21 +835,22 @@ impl App {
                 Got::Upvoted(result) => self.upvoted(result),
                 Got::ReplyForm(id, result) => self.got_reply_form(id, result),
                 Got::Posted(story, result) => self.posted(story, result),
-                Got::Article(id, article) => {
+                Got::Article(source, article) => {
                     // The first picture of every article fetched; the rest
                     // once it's read.
                     if let (Some(_), Some(md)) = (&self.picker, article.md())
                         && let Some(first) = crate::figure::all(md).into_iter().next()
                     {
-                        let urgent = self.current_key().is_some_and(|(on, _)| on == id);
-                        self.ask(Asked::Figure(id, 0), Job::Figure(id, 0, first.url), urgent);
+                        let urgent = self.current_source().as_ref() == Some(&source);
+                        let job = Job::Figure(source.clone(), 0, first.url);
+                        self.ask(Asked::Figure(source.clone(), 0), job, urgent);
                     }
-                    self.articles.insert(id, article);
-                    self.rebuild(id);
+                    self.articles.insert(source.clone(), article);
+                    self.rebuild_source(&source);
                 }
-                Got::Figure(id, index, Ok(picture)) => {
-                    self.figures.insert((id, index), picture);
-                    self.rebuild(id);
+                Got::Figure(source, index, Ok(picture)) => {
+                    self.figures.insert((source.clone(), index), picture);
+                    self.rebuild_source(&source);
                 }
                 Got::Figure(_, _, Err(_)) => {}
             }
@@ -878,17 +898,30 @@ impl App {
     /// Asks for the stories around the selection: the list's rows, and the
     /// comments and articles of the stories nearest it, the selected one
     /// first.
-    /// All the pictures of the story being read, once its article's here:
-    /// the first of every article is fetched with it.
+    /// All the pictures of the article being read, once it's here: the
+    /// first of every article is fetched with it.
     fn fetch_pictures(&mut self) {
-        let Some(id) = self.reading.filter(|id| self.picker.is_some() && !self.pictured.contains(id)) else {
+        let reading = match &self.page {
+            Some(nav::Page::Web(url)) => Some(Source::Page(url.clone())),
+            Some(_) => None,
+            None => self.reading.map(Source::Story),
+        };
+        let Some(source) = reading.filter(|s| self.picker.is_some() && !self.pictured.contains(s))
+        else {
             return;
         };
-        let Some(Article::Text { md, .. }) = self.articles.get(&id) else { return };
-        self.pictured.insert(id);
+        let Some(Article::Text { md, .. }) = self.articles.get(&source) else {
+            return;
+        };
+        let found = crate::figure::all(md);
+        self.pictured.insert(source.clone());
         // Each to the front, so the last asked is fetched first.
-        for (i, found) in crate::figure::all(md).into_iter().enumerate().skip(1).rev() {
-            self.ask(Asked::Figure(id, i), Job::Figure(id, i, found.url), true);
+        for (i, found) in found.into_iter().enumerate().skip(1).rev() {
+            self.ask(
+                Asked::Figure(source.clone(), i),
+                Job::Figure(source.clone(), i, found.url),
+                true,
+            );
         }
     }
 
@@ -900,7 +933,9 @@ impl App {
         // The rows on screen, and those a little way below; all of them
         // while filtering, so the filter sees every title.
         let first = self.list.offset().min(ids.len());
-        let end = (sel + LIST_AHEAD).max(first + self.list_rows).min(ids.len());
+        let end = (sel + LIST_AHEAD)
+            .max(first + self.list_rows)
+            .min(ids.len());
         let (first, end) = if self.filter.is_empty() {
             (first, end)
         } else {
@@ -928,7 +963,11 @@ impl App {
             // Comments come quickly and articles slowly: asking for the
             // article first puts the comments in front of it.
             if let Some(url) = url {
-                self.ask(Asked::Article(id), Job::Article(id, url), urgent);
+                self.ask(
+                    Asked::Article(Source::Story(id)),
+                    Job::Article(Source::Story(id), url),
+                    urgent,
+                );
             }
             self.ask(Asked::Thread(id), Job::Thread(id, kids), urgent);
         }
@@ -952,9 +991,49 @@ impl App {
             Some(&marked) => marked,
             None => self.seen.stories.get(&id).map(|s| s.newest),
         };
-        let pictures = |i| self.figures.get(&(id, i));
-        let marks = story::Marks { seen, folded: &self.folded };
-        story::markdown(story, self.articles.get(&id), comments, preview, now(), marks, &pictures)
+        let source = Source::Story(id);
+        let pictures = |i| self.figures.get(&(source.clone(), i));
+        let marks = story::Marks {
+            seen,
+            folded: &self.folded,
+        };
+        story::markdown(
+            story,
+            self.articles.get(&source),
+            comments,
+            preview,
+            now(),
+            marks,
+            &pictures,
+        )
+    }
+
+    /// Brings the documents showing `source`'s article up to date.
+    fn rebuild_source(&mut self, source: &Source) {
+        match source {
+            Source::Story(id) => self.rebuild(*id),
+            Source::Page(url) => self.rebuild_page(&nav::Page::Web(url.clone())),
+        }
+    }
+
+    /// Brings a page's document up to date with what's been fetched.
+    fn rebuild_page(&mut self, page: &nav::Page) {
+        if self.page_docs.contains_key(page) {
+            let md = self.page_markdown(page);
+            self.page_docs.get_mut(page).unwrap().replace(md);
+        }
+    }
+
+    /// Whose article is on screen: the story's, or a web page's.
+    fn current_source(&self) -> Option<Source> {
+        if self.focus == Focus::Reader || self.kept() {
+            match &self.page {
+                Some(nav::Page::Web(url)) => return Some(Source::Page(url.clone())),
+                Some(_) => return None,
+                None => {}
+            }
+        }
+        self.current_key().map(|(id, _)| Source::Story(id))
     }
 
     /// Brings a story's documents up to date with what's been fetched.
@@ -983,23 +1062,22 @@ impl App {
             _ if self.kept() => self.reading.map(|id| (id, false)),
             // The story being read stays whole, and where it was, while
             // it's selected; the others show their previews.
-            Focus::List => self
-                .selected_id()
-                .map(|id| (id, Some(id) != self.reading)),
+            Focus::List => self.selected_id().map(|id| (id, Some(id) != self.reading)),
         }
     }
 
     fn current(&mut self) -> Option<&mut Doc> {
         if (self.focus == Focus::Reader || self.kept())
-            && let Some(name) = self.user_page.clone()
+            && let Some(page) = self.page.clone()
         {
-            return Some(self.user_doc(&name));
+            return Some(self.page_doc(&page));
         }
         let key = self.current_key()?;
         Some(self.doc(key))
     }
 
-    /// The target of the link `j` and `k` are on, in a comment, reading.
+    /// The target of the link `j` and `k` are on, in a comment, or the
+    /// reading band, in the article.
     fn focused_link(&mut self) -> Option<String> {
         if self.focus != Focus::Reader {
             return None;
@@ -1009,7 +1087,7 @@ impl App {
 
     /// The comment the cursor's on, reading a story.
     fn cursor_comment(&mut self) -> Option<u64> {
-        if self.user_page.is_some() && (self.focus == Focus::Reader || self.kept()) {
+        if self.page.is_some() && (self.focus == Focus::Reader || self.kept()) {
             return None;
         }
         self.current()?.focused().map(|c| c.id)
@@ -1026,7 +1104,9 @@ impl App {
 
     /// Every top-level comment folded: the threads, one line each.
     fn fold_threads(&mut self) {
-        let Some((story, _)) = self.current_key() else { return };
+        let Some((story, _)) = self.current_key() else {
+            return;
+        };
         if let Some(Ok(comments)) = self.threads.get(&story) {
             self.folded.extend(comments.iter().map(|c| c.id));
         }
@@ -1075,9 +1155,17 @@ impl App {
         }
         let index = keep.and_then(|id| self.shown.iter().position(|s| s.id == id));
         // One that's gone (hidden, say): the one that took its place.
-        let near = self.list.selected().filter(|_| keep.is_some()).map(|i| i.min(self.shown.len().saturating_sub(1)));
-        self.list
-            .select(index.or(near).or((!self.shown.is_empty()).then_some(0)).filter(|_| !self.shown.is_empty()));
+        let near = self
+            .list
+            .selected()
+            .filter(|_| keep.is_some())
+            .map(|i| i.min(self.shown.len().saturating_sub(1)));
+        self.list.select(
+            index
+                .or(near)
+                .or((!self.shown.is_empty()).then_some(0))
+                .filter(|_| !self.shown.is_empty()),
+        );
     }
 
     /// Switches to the Omarchy theme's new colors, if it has changed.
@@ -1121,7 +1209,7 @@ impl App {
         }
         // Another story: a fresh start, with nothing to go back to.
         self.history.clear();
-        self.user_page = None;
+        self.page = None;
         let preview = self.doc((id, true));
         let in_comments = comments_line(preview).is_some_and(|line| preview.top() >= line);
         let heading = preview
@@ -1144,7 +1232,14 @@ impl App {
         let before = self.list.selected();
         self.select_by(delta);
         if self.list.selected() == before {
-            self.flash = Some(if delta > 0 { "Last story" } else { "First story" }.into());
+            self.flash = Some(
+                if delta > 0 {
+                    "Last story"
+                } else {
+                    "First story"
+                }
+                .into(),
+            );
             return;
         }
         if self.focus == Focus::Reader {
@@ -1180,11 +1275,13 @@ impl App {
 
     /// `C`: to the comments, and back to where that came from.
     fn toggle_comments(&mut self) {
-        if self.focus == Focus::Reader && self.user_page.is_some() {
-            self.flash = Some("No comments on someone's page".into());
+        if self.focus == Focus::Reader && self.page.is_some() {
+            self.flash = Some("No comments on this page".into());
             return;
         }
-        let Some(key) = self.current_key() else { return };
+        let Some(key) = self.current_key() else {
+            return;
+        };
         let back = self.before_comments.get(&key).copied();
         let doc = self.doc(key);
         let Some(line) = comments_line(doc) else {
@@ -1204,7 +1301,7 @@ impl App {
     /// `w`: the story's link in the browser (or its HN page, with `W` or
     /// when it has no link).
     fn open_in_browser(&mut self, hn_page: bool) {
-        // On a link in a comment, that link.
+        // On a link in a comment or the reading band, that link.
         if !hn_page && let Some(url) = self.focused_link() {
             return match crate::hn::link(&url) {
                 Some(_) => self.follow(&url),
@@ -1212,8 +1309,14 @@ impl App {
             };
         }
         let reader_shown = self.focus == Focus::Reader || self.kept();
-        if let (true, Some(name)) = (reader_shown, &self.user_page) {
-            let url = crate::hn::user_url(name);
+        if let (true, Some(page)) = (reader_shown, &self.page) {
+            let url = match page {
+                nav::Page::User(name) => crate::hn::user_url(name),
+                nav::Page::Replies => {
+                    crate::hn::threads_url(self.replies_for.as_deref().unwrap_or_default())
+                }
+                nav::Page::Web(url) => url.clone(),
+            };
             return self.open_outside_now(&url);
         }
         let id = match self.current_key() {
@@ -1251,16 +1354,23 @@ impl App {
     /// isn't in it (dead, say, or too new for HN's search), says so, and
     /// goes to the comments.
     fn missing_comment(&mut self, id: u64) {
-        let Some(Ok(thread)) = self.threads.get(&id) else { return };
-        let Some(doc) = self.docs.get(&(id, false)) else { return };
-        let Some(comment) = doc.pending_comment() else { return };
+        let Some(Ok(thread)) = self.threads.get(&id) else {
+            return;
+        };
+        let Some(doc) = self.docs.get(&(id, false)) else {
+            return;
+        };
+        let Some(comment) = doc.pending_comment() else {
+            return;
+        };
         if act::find(thread, comment).is_some() {
             return;
         }
         let doc = self.docs.get_mut(&(id, false)).unwrap();
         let line = comments_line(doc);
         doc.give_up_comment(line);
-        self.flash = Some("That comment isn't in the thread HN's search has: dead, or too new".into());
+        self.flash =
+            Some("That comment isn't in the thread HN's search has: dead, or too new".into());
     }
 
     /// Who you are, if it's known without asking the keyring: from the
@@ -1277,18 +1387,26 @@ impl App {
 
     /// The reply to you with id `id`, if it's one.
     pub(super) fn reply_to_you(&self, id: u64) -> Option<&crate::hn::Reply> {
-        let Some(Ok(replies)) = &self.replies else { return None };
+        let Some(Ok(replies)) = &self.replies else {
+            return None;
+        };
         replies.replies.iter().find(|r| r.id == id)
     }
 
     /// How many replies to you are new.
     fn new_replies(&self) -> usize {
-        let Some(Ok(replies)) = &self.replies else { return 0 };
-        replies.replies.iter().filter(|r| r.id > self.replies_seen).count()
+        let Some(Ok(replies)) = &self.replies else {
+            return 0;
+        };
+        replies
+            .replies
+            .iter()
+            .filter(|r| r.id > self.replies_seen)
+            .count()
     }
 
     fn replies_shown(&self) -> bool {
-        (self.focus == Focus::Reader || self.kept()) && self.user_page.as_deref() == Some(REPLIES)
+        (self.focus == Focus::Reader || self.kept()) && self.page == Some(nav::Page::Replies)
     }
 
     /// `i`: the replies to you.
@@ -1297,7 +1415,9 @@ impl App {
             self.find_login();
         }
         let Some(me) = self.known_me() else {
-            self.flash = Some("Whose replies? L logs in, or user = \"you\" in ~/.lshn/config.toml says".into());
+            self.flash = Some(
+                "Whose replies? L logs in, or user = \"you\" in ~/.lshn/config.toml says".into(),
+            );
             return;
         };
         if self.replies_for.as_ref() != Some(&me) {
@@ -1305,15 +1425,9 @@ impl App {
             self.replies_seen = store::replies_seen(store::dir().as_deref(), &me);
             self.replies_for = Some(me.clone());
         }
-        match self.here() {
-            Some(here) => self.history.push(here),
-            None => self.history.clear(),
-        }
         self.replies_mark = self.replies_seen;
-        self.focus = Focus::Reader;
-        self.user_page = Some(REPLIES.into());
-        self.user_docs.remove(REPLIES);
-        self.user_doc(REPLIES).jump_to(0);
+        self.page_docs.remove(&nav::Page::Replies);
+        self.open_page(nav::Page::Replies);
         // Fetched afresh each time: it's what's new that's wanted.
         self.send(Job::Replies(me), true);
         self.show_replies_update();
@@ -1322,10 +1436,7 @@ impl App {
     /// The replies page, again, with what's come; and once it's been
     /// shown, they're not new any more, though it keeps marking them.
     fn show_replies_update(&mut self) {
-        if self.user_docs.contains_key(REPLIES) {
-            let md = self.replies_markdown();
-            self.user_docs.get_mut(REPLIES).unwrap().replace(md);
-        }
+        self.rebuild_page(&nav::Page::Replies);
         if !self.replies_shown() {
             return;
         }
@@ -1378,7 +1489,7 @@ impl App {
     fn story_here(&self) -> Option<u64> {
         let reader_shown = self.focus == Focus::Reader || self.kept();
         match self.current_key() {
-            _ if reader_shown && self.user_page.is_some() => None,
+            _ if reader_shown && self.page.is_some() => None,
             Some((id, _)) if reader_shown => Some(id),
             _ => self.selected_id(),
         }
@@ -1390,7 +1501,11 @@ impl App {
             self.flash = Some("No story here to save".into());
             return;
         };
-        let title = self.stories.get(&id).map(|s| s.title.clone()).unwrap_or_default();
+        let title = self
+            .stories
+            .get(&id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
         self.flash = Some(if self.saved.toggle(id, now()) {
             format!("Saved “{}”: 7 lists what's saved", safe::printable(&title))
         } else {
@@ -1404,7 +1519,11 @@ impl App {
             self.flash = Some("No story here to hide".into());
             return;
         };
-        let title = self.stories.get(&id).map(|s| s.title.clone()).unwrap_or_default();
+        let title = self
+            .stories
+            .get(&id)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
         self.flash = Some(if self.hid.toggle(id, now()) {
             format!("Hid “{}”: X shows what's hidden", safe::printable(&title))
         } else {
@@ -1442,7 +1561,9 @@ impl App {
                 self.show_hidden = !self.show_hidden;
                 self.flash = Some(match (self.show_hidden, self.hid.stories.len()) {
                     (true, 0) => "Nothing's hidden".into(),
-                    (true, n) => format!("Showing the {n} hidden: x brings one back; X hides them again"),
+                    (true, n) => {
+                        format!("Showing the {n} hidden: x brings one back; X hides them again")
+                    }
                     (false, _) => "Hiding the hidden ones again".into(),
                 });
                 self.refresh();
@@ -1527,8 +1648,7 @@ impl App {
         }
         self.refresh();
         // The best match.
-        self.list
-            .select((!self.shown.is_empty()).then_some(0));
+        self.list.select((!self.shown.is_empty()).then_some(0));
     }
 
     fn list_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
@@ -1582,8 +1702,15 @@ impl App {
     }
 
     fn reader_key(&mut self, key: KeyEvent, ctrl: bool) -> bool {
-        // Enter: the story beside the list to full screen, and full screen
-        // back to the list, where it was, with the story beside it.
+        // Enter: on a link, follows it; otherwise, the story beside the
+        // list to full screen, and full screen back to the list, where it
+        // was, with the story beside it.
+        if key.code == KeyCode::Enter
+            && let Some(url) = self.focused_link()
+        {
+            self.follow(&url);
+            return false;
+        }
         if key.code == KeyCode::Enter {
             if self.list_in_reader && self.body_width >= NARROW {
                 self.list_in_reader = false;
@@ -1637,11 +1764,19 @@ impl App {
             }
             // What ↑ and ↓ do in the list: the next and previous story.
             // ⌃J ⌃K keep your hands on the home row.
-            KeyCode::Down if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
+            KeyCode::Down
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
                 self.next_story(1);
                 return false;
             }
-            KeyCode::Up if key.modifiers.intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) => {
+            KeyCode::Up
+                if key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::CONTROL) =>
+            {
                 self.next_story(-1);
                 return false;
             }
@@ -1757,7 +1892,9 @@ impl App {
             title.push(Span::raw("  "));
         }
         title.push(match &self.search {
-            Some(query) => Span::raw(format!("s “{}”", safe::printable(query))).bold().underlined(),
+            Some(query) => Span::raw(format!("s “{}”", safe::printable(query)))
+                .bold()
+                .underlined(),
             None => Span::raw("s Search").dim(),
         });
         title.push(Span::raw("  "));
@@ -1768,11 +1905,22 @@ impl App {
             n => Span::raw(format!("i {n} new replies")).yellow().bold(),
         });
         title.push(Span::raw("  "));
+        // After following a link, the way back, to click.
+        let back = self.focus == Focus::Reader && !self.history.is_empty();
+        if back {
+            title.push(Span::raw("esc Back").bold());
+            title.push(Span::raw("  "));
+        }
         // `lshn`, then each tab, by its key: where they are, to click.
-        let keys = [None]
+        let keys = [HeaderHit::Home]
             .into_iter()
-            .chain(Feed::ALL.iter().enumerate().map(|(i, _)| char::from_digit(i as u32 + 1, 10)))
-            .chain([Some('s'), Some('i')]);
+            .chain(
+                (1..=Feed::ALL.len() as u32)
+                    .filter_map(|n| char::from_digit(n, 10))
+                    .map(HeaderHit::Key),
+            )
+            .chain([HeaderHit::Key('s'), HeaderHit::Key('i')])
+            .chain(back.then_some(HeaderHit::Back));
         let mut x = area.x;
         let mut hits = Vec::new();
         let mut spans = title.iter().map(|s| s.width() as u16);
@@ -1815,13 +1963,14 @@ impl App {
     fn coming(&self) -> Option<String> {
         let reader = self.focus == Focus::Reader || self.kept();
         let mut parts = Vec::new();
-        if let (true, Some(name)) = (reader, &self.user_page) {
-            if name == REPLIES {
-                if self.replies.is_none() {
-                    parts.push("replies");
+        if let (true, Some(page)) = (reader, &self.page) {
+            match page {
+                nav::Page::Replies if self.replies.is_none() => parts.push("replies"),
+                nav::Page::User(name) if !self.users.contains_key(name) => parts.push("their page"),
+                nav::Page::Web(url) if !self.articles.contains_key(&Source::Page(url.clone())) => {
+                    parts.push("page")
                 }
-            } else if !self.users.contains_key(name) {
-                parts.push("their page");
+                _ => {}
             }
         } else {
             let (id, _) = self.current_key()?;
@@ -1831,7 +1980,7 @@ impl App {
                     if !self.threads.contains_key(&id) {
                         parts.push("comments");
                     }
-                    if story.url.is_some() && !self.articles.contains_key(&id) {
+                    if story.url.is_some() && !self.articles.contains_key(&Source::Story(id)) {
                         parts.push("article");
                     }
                 }
@@ -1842,7 +1991,10 @@ impl App {
 
     fn pane(&self, title: impl Into<Line<'static>>, focused: bool) -> Block<'static> {
         // In the theme's accent, if it has one; dim without the keyboard.
-        let border = self.theme.frame.map_or(Style::new(), |c| Style::new().fg(c));
+        let border = self
+            .theme
+            .frame
+            .map_or(Style::new(), |c| Style::new().fg(c));
         let border = if focused { border } else { border.dim() };
         Block::bordered().title(title).border_style(border)
     }
@@ -1942,11 +2094,10 @@ impl App {
 
     /// The story's picture, over the room its document left for it.
     fn draw_figure(&mut self, f: &mut Frame) {
-        let user_page = (self.focus == Focus::Reader || self.kept()) && self.user_page.is_some();
         let on_screen = self
-            .current_key()
-            .filter(|_| !user_page && self.picker.is_some())
-            .and_then(|(id, _)| {
+            .current_source()
+            .filter(|_| self.picker.is_some())
+            .and_then(|id| {
                 let doc = self.current()?;
                 let (area, figures) = doc.figures();
                 Some((id, doc.top(), area, figures))
@@ -1964,9 +2115,9 @@ impl App {
         // sent once, and only placed after), so theirs move as they are.
         let now = Instant::now();
         let settled = self.figure_moved.is_none_or(|t| now - t >= FIGURE_SETTLE);
-        if self.figure_at != Some((id, top)) {
+        if self.figure_at.as_ref() != Some(&(id.clone(), top)) {
             self.figure_moving = !settled;
-            self.figure_at = Some((id, top));
+            self.figure_at = Some((id.clone(), top));
             self.figure_moved = Some(now);
         } else if settled {
             self.figure_moving = false;
@@ -1982,15 +2133,18 @@ impl App {
             keep
         });
         for (figure, y) in figures {
-            let key = (id, figure.index, figure.cols, figure.rows);
+            let key = (id.clone(), figure.index, figure.cols, figure.rows);
             if !self.drawn.contains_key(&key)
-                && let Some(picture) = self.figures.get(&(id, figure.index))
-                && let Some(mut drawn) = crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
+                && let Some(picture) = self.figures.get(&(id.clone(), figure.index))
+                && let Some(mut drawn) =
+                    crate::figure::Drawn::new(picker, picture, figure.cols, figure.rows)
             {
                 self.to_send.extend(drawn.take_send());
-                self.drawn.insert(key, drawn);
+                self.drawn.insert(key.clone(), drawn);
             }
-            let Some(drawn) = self.drawn.get(&key) else { continue };
+            let Some(drawn) = self.drawn.get(&key) else {
+                continue;
+            };
             let moving = self.figure_moving;
             // Centred over the text.
             let x = figure.width.saturating_sub(figure.cols) / 2;
@@ -2057,8 +2211,9 @@ impl App {
             f.render_widget(Paragraph::new(Line::from(format!(" {msg}")).yellow()), area);
             return;
         }
-        // On a link in a comment: where it goes, and what to do with it.
+        // On a link: where it goes, and what to do with it.
         let link = self.focused_link();
+        let in_comment = self.current().is_some_and(|d| d.focused().is_some());
         // Who `r` would answer, reading.
         let reply = match self.acting_on() {
             Some(id) if self.stories.contains_key(&id) => "comment".to_string(),
@@ -2105,11 +2260,34 @@ impl App {
                     keys.extend([("?", "help"), ("q", "quit")]);
                     keys
                 }
-                Focus::Reader if link.is_some() => vec![
-                    ("w", "open link"),
+                Focus::Reader if link.is_some() && in_comment => vec![
+                    ("⏎", "read"),
+                    ("w", "browser"),
                     ("c", "copy"),
                     ("↑↓", "next link"),
                     ("esc", "off link"),
+                ],
+                // The article's band: scrolling moves it on.
+                Focus::Reader if link.is_some() => vec![
+                    ("⏎", "read"),
+                    ("w", "browser"),
+                    ("c", "copy"),
+                    ("f", "follow"),
+                ],
+                // A web page: no comments, nothing to reply to.
+                Focus::Reader if matches!(self.page, Some(nav::Page::Web(_))) => vec![
+                    ("↑↓", "scroll"),
+                    ("] [", "headings"),
+                    ("/", "search"),
+                    ("f", "follow"),
+                    ("w", "browser"),
+                    ("c", "copy"),
+                    if searching {
+                        ("esc", "clear search")
+                    } else {
+                        ("esc", "back")
+                    },
+                    ("?", "help"),
                 ],
                 Focus::Reader => vec![
                     ("↑↓", "scroll"),
@@ -2267,7 +2445,11 @@ fn title_lines(
     let new = seen.map_or(0, |s| story.descendants.saturating_sub(s.count));
     if new > 0 {
         chars.push((' ', plain));
-        chars.extend(format!("+{new}").chars().map(|c| (c, Style::new().yellow())));
+        chars.extend(
+            format!("+{new}")
+                .chars()
+                .map(|c| (c, Style::new().yellow())),
+        );
     }
 
     // Break at the last space that fits, or mid-word if a word alone
@@ -2339,7 +2521,10 @@ fn draw_help(f: &mut Frame) {
         (
             "Moving",
             &[
-                ("↑↓ j k", "Move / scroll; in the comments, comment by comment"),
+                (
+                    "↑↓ j k",
+                    "Move / scroll; in the comments, comment by comment",
+                ),
                 ("J K", "Page down / up (⇧↓ ⇧↑ too, in the list)"),
                 ("space b", "Page down / up (the preview, in the list)"),
                 ("d u", "Half page down / up"),
@@ -2353,12 +2538,24 @@ fn draw_help(f: &mut Frame) {
             "Stories",
             &[
                 ("⏎", "Read the selected story full screen"),
-                ("→ l", "To the story, beside the list if there's room (as tab)"),
-                ("⏎", "Reading: beside the list, full screen; full screen, back to the list"),
-                ("tab", "Between the list and the story (both stay, if there's room)"),
+                (
+                    "→ l",
+                    "To the story, beside the list if there's room (as tab)",
+                ),
+                (
+                    "⏎",
+                    "Reading: beside the list, full screen; full screen, back to the list",
+                ),
+                (
+                    "tab",
+                    "Between the list and the story (both stay, if there's room)",
+                ),
                 ("\\", "Show or hide the list while reading"),
                 ("esc ← h", "Back to the list (esc quits there)"),
-                ("^j ^k ^↓ ^↑", "Next / previous story, reading (⇧↓ ⇧↑ > < too)"),
+                (
+                    "^j ^k ^↓ ^↑",
+                    "Next / previous story, reading (⇧↓ ⇧↑ > < too)",
+                ),
                 ("1-7", "Top, New, Best, Ask, Show, Jobs; Saved"),
                 ("/", "Filter the list by title (fuzzy)"),
                 ("s", "Search all of HN's stories (or open an HN link or id)"),
@@ -2369,7 +2566,10 @@ fn draw_help(f: &mut Frame) {
             "Comments",
             &[
                 ("C", "To the comments, and back"),
-                ("↓ ↑ j k", "Next / previous comment, or link in it (w opens it)"),
+                (
+                    "↓ ↑ j k",
+                    "Next / previous comment, or link in it (w opens it)",
+                ),
                 ("] [", "Next / previous comment (or heading)"),
                 ("} {", "Next / previous thread, skipping replies"),
                 ("space", "On a comment: fold it and its replies, or unfold"),
@@ -2381,8 +2581,18 @@ fn draw_help(f: &mut Frame) {
         (
             "Links and searching",
             &[
-                ("f", "Follow a link (type the letters shown on it)"),
-                ("w W", "Open the story's link (or the comment's, on one) / its HN page"),
+                (
+                    "⏎",
+                    "On a highlighted link: read it here, as an article (esc comes back)",
+                ),
+                (
+                    "f",
+                    "Follow a link (type the letters shown on it), the same way",
+                ),
+                (
+                    "w W",
+                    "Open the story's link (or the highlighted one) / its HN page in the browser",
+                ),
                 ("/ n N", "Reading: search; next / previous match"),
                 ("^s ^r", "Search forward / back; typing: next / previous"),
             ],
@@ -2390,11 +2600,23 @@ fn draw_help(f: &mut Frame) {
         (
             "Yours",
             &[
-                ("v", "Upvote the selected comment, or above the comments, the story; again, unvote"),
-                ("r", "Reply to the selected comment, or above the comments, the story (in a box)"),
-                ("c", "Copy: the story's link, the comment, the article… (or drag over text)"),
+                (
+                    "v",
+                    "Upvote the selected comment, or above the comments, the story; again, unvote",
+                ),
+                (
+                    "r",
+                    "Reply to the selected comment, or above the comments, the story (in a box)",
+                ),
+                (
+                    "c",
+                    "Copy: the story's link, the comment, the article… (or drag over text)",
+                ),
                 ("S", "Save the story to read later, or no longer"),
-                ("x X", "Hide the story from the lists, or bring it back / show the hidden"),
+                (
+                    "x X",
+                    "Hide the story from the lists, or bring it back / show the hidden",
+                ),
                 ("L", "Log in to HN, or out"),
             ],
         ),
@@ -2599,8 +2821,12 @@ mod tests {
             url: Some("https://www.example.com/x".into()),
             ..Story::default()
         };
-        let texts =
-            |width| -> Vec<String> { title_lines(Some(&story), &[], None, Mark::None, width).iter().map(text).collect() };
+        let texts = |width| -> Vec<String> {
+            title_lines(Some(&story), &[], None, Mark::None, width)
+                .iter()
+                .map(text)
+                .collect()
+        };
         assert_eq!(texts(40), [" • A rather long title for a story"]);
         assert_eq!(texts(22), [" • A rather long title", "   for a story"]);
         // A word too long for a row breaks mid-word.
@@ -2622,7 +2848,10 @@ mod tests {
         assert!(muted(&story("The AI boom", "https://a.b"), &mute));
         assert!(muted(&story("Why AI's hype", "https://a.b"), &mute));
         assert!(!muted(&story("Hawaii", "https://a.b"), &mute));
-        assert!(muted(&story("A Web3 wallet for cats", "https://a.b"), &mute));
+        assert!(muted(
+            &story("A Web3 wallet for cats", "https://a.b"),
+            &mute
+        ));
         assert!(!muted(&story("A wallet for web3", "https://a.b"), &mute));
     }
 
@@ -2640,17 +2869,29 @@ mod tests {
         };
         let lines = title_lines(Some(&story), &[], Some(&seen), Mark::None, 40);
         assert_eq!(text(&lines[0]), " • Title +3");
-        let title = lines[0].spans.iter().find(|s| s.content.contains("Title")).unwrap();
+        let title = lines[0]
+            .spans
+            .iter()
+            .find(|s| s.content.contains("Title"))
+            .unwrap();
         assert!(title.style.add_modifier.contains(Modifier::DIM));
         let caught_up = Seen { count: 12, ..seen };
-        assert_eq!(text(&title_lines(Some(&story), &[], Some(&caught_up), Mark::None, 40)[0]), " • Title");
+        assert_eq!(
+            text(&title_lines(Some(&story), &[], Some(&caught_up), Mark::None, 40)[0]),
+            " • Title"
+        );
     }
 
     /// Reading a story remembers it, and its comments stay marked new
     /// until another story is read.
     #[test]
     fn reading_remembers_and_marks_new_comments_until_you_move_on() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         let comment = |id| crate::hn::Comment {
             id,
             by: "x".into(),
@@ -2658,9 +2899,24 @@ mod tests {
             ..crate::hn::Comment::default()
         };
         for id in [1, 2] {
-            app.stories.insert(id, Story { id, title: "t".into(), descendants: 2, ..Story::default() });
+            app.stories.insert(
+                id,
+                Story {
+                    id,
+                    title: "t".into(),
+                    descendants: 2,
+                    ..Story::default()
+                },
+            );
         }
-        app.seen.stories.insert(1, Seen { at: 1, newest: 100, count: 1 });
+        app.seen.stories.insert(
+            1,
+            Seen {
+                at: 1,
+                newest: 100,
+                count: 1,
+            },
+        );
         app.threads.insert(1, Ok(vec![comment(100), comment(200)]));
         app.ids = Some(vec![1, 2]);
         app.refresh();
@@ -2676,14 +2932,89 @@ mod tests {
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
+    /// Following a web link reads it here, as an article; a link in it
+    /// reads that too; and Esc, or clicking `esc Back`, comes back a page
+    /// at a time.
+    #[test]
+    fn reads_web_pages_here_and_comes_back() {
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
+        let url = "https://example.com/post";
+        let story = Story {
+            id: 1,
+            title: "Story".into(),
+            url: Some(url.into()),
+            ..Story::default()
+        };
+        app.stories.insert(1, story);
+        app.ids = Some(vec![1]);
+        app.refresh();
+        app.read_selected();
+        // The story's own link is the article already shown.
+        app.follow(url);
+        assert!(app.page.is_none());
+
+        let first = "https://example.org/a";
+        app.follow(first);
+        assert_eq!(app.page, Some(nav::Page::Web(first.into())));
+        assert!(app.visited.contains(first), "dimmed, as opened");
+        let md = app.page_markdown(&nav::Page::Web(first.into()));
+        assert!(
+            md.starts_with("# example\\.org") && md.contains("Loading"),
+            "{md}"
+        );
+        // Its article comes, and shows under its title.
+        let article = Article::Text {
+            md: "Some text, and [another page](<https://example.net/b>).".into(),
+            words: 5,
+            title: "A page".into(),
+        };
+        app.articles.insert(Source::Page(first.into()), article);
+        app.rebuild_source(&Source::Page(first.into()));
+        let md = app.page_markdown(&nav::Page::Web(first.into()));
+        assert!(
+            md.starts_with("# A page\n\n[example\\.org](<https://example.org/a>) · 1 min read"),
+            "{md}"
+        );
+        assert!(md.contains("Some text"), "{md}");
+
+        app.follow("https://example.net/b");
+        assert_eq!(
+            app.page,
+            Some(nav::Page::Web("https://example.net/b".into()))
+        );
+        // Esc back to the first page; clicking `esc Back`, to the story.
+        app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert_eq!(app.page, Some(nav::Page::Web(first.into())));
+        app.header_hits = (0, vec![(0, 8, HeaderHit::Back)]);
+        app.click_header(2, 0);
+        assert!(app.page.is_none() && app.reading == Some(1) && app.focus == Focus::Reader);
+    }
+
     /// Following HN links opens stories and people's pages here, and Esc
     /// comes back through them, each where it was, then to the list.
     #[test]
     fn follows_hn_links_and_comes_back() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         for id in [1, 2] {
-            app.stories.insert(id, Story { id, title: format!("Story {id}"), ..Story::default() });
+            app.stories.insert(
+                id,
+                Story {
+                    id,
+                    title: format!("Story {id}"),
+                    ..Story::default()
+                },
+            );
         }
         app.ids = Some(vec![1]);
         app.refresh();
@@ -2691,17 +3022,17 @@ mod tests {
         app.follow("https://news.ycombinator.com/item?id=2");
         assert_eq!(app.reading, Some(2));
         app.follow("https://news.ycombinator.com/user?id=pg");
-        assert_eq!(app.user_page.as_deref(), Some("pg"));
+        assert_eq!(app.page, Some(nav::Page::User("pg".into())));
         assert!(app.current().is_some());
 
         // Tab to the list and back keeps the page and the way back.
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert!(app.focus == Focus::Reader);
-        assert_eq!(app.user_page.as_deref(), Some("pg"));
+        assert_eq!(app.page, Some(nav::Page::User("pg".into())));
 
         app.key(esc);
-        assert!(app.user_page.is_none() && app.reading == Some(2));
+        assert!(app.page.is_none() && app.reading == Some(2));
         app.key(esc);
         assert!(app.focus == Focus::Reader && app.reading == Some(1));
         app.key(esc);
@@ -2718,7 +3049,12 @@ mod tests {
     fn enter_goes_full_screen_and_back() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         app.body_width = 160;
         app.ids = Some(vec![1, 2, 3]);
         app.refresh();
@@ -2726,7 +3062,10 @@ mod tests {
         app.key(tab);
         assert!(app.focus == Focus::Reader && app.list_in_reader);
         app.key(enter);
-        assert!(app.focus == Focus::Reader && !app.list_in_reader, "full screen");
+        assert!(
+            app.focus == Focus::Reader && !app.list_in_reader,
+            "full screen"
+        );
         app.key(enter);
         assert!(app.focus == Focus::List, "back to the list");
         assert_eq!(app.selected_id(), Some(2), "where it was");
@@ -2735,11 +3074,17 @@ mod tests {
         // did before; Enter from the list, full screen.
         let l = KeyEvent::new(KeyCode::Char('l'), KeyModifiers::NONE);
         app.key(l);
-        assert!(app.focus == Focus::Reader && app.list_in_reader, "beside the list");
+        assert!(
+            app.focus == Focus::Reader && app.list_in_reader,
+            "beside the list"
+        );
         app.key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         assert!(app.focus == Focus::List);
         app.key(enter);
-        assert!(app.focus == Focus::Reader && !app.list_in_reader, "full screen from the list");
+        assert!(
+            app.focus == Focus::Reader && !app.list_in_reader,
+            "full screen from the list"
+        );
         app.key(enter);
         // Too narrow for two panes: the story's alone, so back to the list.
         app.body_width = 70;
@@ -2753,7 +3098,12 @@ mod tests {
     /// top, till a story's been chosen; then that one stays selected.
     #[test]
     fn a_newer_list_starts_at_the_top_till_one_is_chosen() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         app.ids = Some(vec![1, 2, 3]);
         app.refresh();
         assert_eq!(app.selected_id(), Some(1));
@@ -2772,7 +3122,12 @@ mod tests {
     fn tab_switches_views() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         for (width, both) in [(160, true), (100, false)] {
-            let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+            let mut app = App::new(
+                Theme::plain(),
+                None,
+                Fetcher::start(Cache::none()),
+                SeenStore::load(None, 0),
+            );
             app.body_width = width;
             app.ids = Some(vec![1, 2]);
             app.refresh();
@@ -2792,7 +3147,12 @@ mod tests {
     /// reading, and stop at the ends.
     #[test]
     fn next_and_previous_story() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         let key = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
         app.ids = Some(vec![1, 2, 3]);
         app.refresh();
@@ -2827,7 +3187,12 @@ mod tests {
     /// quits, and ← there does nothing.
     #[test]
     fn left_goes_back_but_never_quits() {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         let key = |c| KeyEvent::new(c, KeyModifiers::NONE);
         app.focus = Focus::Reader;
         assert!(!app.key(key(KeyCode::Left)));

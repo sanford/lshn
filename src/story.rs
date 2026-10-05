@@ -7,9 +7,9 @@
 
 use crate::article::{self, Article};
 use crate::figure;
+use crate::hn::{self, Comment, Replies, Story, User};
 use std::collections::HashSet;
 use std::ops::Range;
-use crate::hn::{self, Comment, Replies, Story, User};
 
 /// Replies nest this deep, then stay there, so deep threads keep room.
 const MAX_DEPTH: usize = 10;
@@ -58,8 +58,9 @@ pub fn markdown(
     }
     if story.url.is_some() {
         // Thin rules around what came from the site rather than from HN.
-        md.push_str(&article_rule(story, article));
-        md.push_str(&article_md(story, article, preview, pictures));
+        let url = story.url.as_deref();
+        md.push_str(&article_rule(url, article));
+        md.push_str(&article_md(url, &story.title, article, preview, pictures));
         md.push_str("\n\n---\n\n");
     }
 
@@ -107,20 +108,53 @@ fn details(story: &Story, now: u64) -> String {
     }
     parts.push(format!("[{} points](<{hn_page}> \"muted\")", story.score));
     if hn::is_username(&story.by) {
-        parts.push(format!("[{}](<{}> \"muted\")", escape(&story.by), hn::user_url(&story.by)));
+        parts.push(format!(
+            "[{}](<{}> \"muted\")",
+            escape(&story.by),
+            hn::user_url(&story.by)
+        ));
     } else if !story.by.is_empty() {
         parts.push(escape(&story.by));
     }
     parts.push(format!("[{}](<{hn_page}> \"muted\")", ago(story.time, now)));
     let s = if story.descendants == 1 { "" } else { "s" };
-    parts.push(format!("[{} comment{s}](<{hn_page}> \"muted\")", story.descendants));
+    parts.push(format!(
+        "[{} comment{s}](<{hn_page}> \"muted\")",
+        story.descendants
+    ));
     parts.join(" · ")
 }
 
+/// A page followed to from a story, as a document: its title, where it's
+/// from, and its article, read the same way as a story's. `article` is
+/// `None` while it's still coming.
+pub fn page_markdown(url: &str, article: Option<&Article>, pictures: Pictures) -> String {
+    let domain = hn::domain(url).unwrap_or_else(|| url.to_string());
+    let title = match article {
+        Some(Article::Text { title, .. }) if !title.is_empty() => title.clone(),
+        _ => domain.clone(),
+    };
+    let mut md = format!(
+        "# {}
+
+[{}](<{}>)",
+        escape(&title),
+        escape(&domain),
+        link_target(url)
+    );
+    if let Some(Article::Text { words, .. }) = article {
+        md.push_str(&format!(" · {} min read", article::minutes(*words)));
+    }
+    md.push_str("\n\n");
+    md.push_str(&article_md(Some(url), &title, article, false, pictures));
+    md.push('\n');
+    md
+}
+
 /// "article from example.com · 6 min read", on the rule above it.
-fn article_rule(story: &Story, article: Option<&Article>) -> String {
+fn article_rule(url: Option<&str>, article: Option<&Article>) -> String {
     let mut label = String::from("article");
-    if let Some(domain) = story.domain() {
+    if let Some(domain) = url.and_then(hn::domain) {
         // Nothing in it can end the comment early.
         let domain: String = domain.chars().filter(|c| !c.is_control()).collect();
         label.push_str(&format!(" from {}", domain.replace("--", "-")));
@@ -134,24 +168,39 @@ fn article_rule(story: &Story, article: Option<&Article>) -> String {
 /// The article's pictures that have been fetched, by their place in it.
 pub type Pictures<'a> = &'a dyn Fn(usize) -> Option<&'a image::DynamicImage>;
 
-/// With its pictures, once they're fetched: the first at the top, the rest
-/// after the paragraphs they're in. The preview has only the first.
-fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures: Pictures) -> String {
+/// The article at `url`, under `title`, with its pictures once they're
+/// fetched: the first at the top, the rest after the paragraphs they're in.
+/// The preview has only the first.
+fn article_md(
+    url: Option<&str>,
+    title: &str,
+    article: Option<&Article>,
+    preview: bool,
+    pictures: Pictures,
+) -> String {
     match article {
         None => "*Loading the article…*".into(),
-        Some(Article::Unreadable(why)) => note(story, "Couldn't read the article", why),
+        Some(Article::Unreadable(why)) => note(url, "Couldn't read the article", why),
         // What the page says about itself, under why that's all.
         Some(Article::About { scripted, md }) => {
             let note = if *scripted {
-                note(story, "This page shows its text with JavaScript", "its text only appears in a browser, which runs its scripts")
+                note(
+                    url,
+                    "This page shows its text with JavaScript",
+                    "its text only appears in a browser, which runs its scripts",
+                )
             } else {
-                note(story, "Couldn't read the article", "couldn't find the article on the page")
+                note(
+                    url,
+                    "Couldn't read the article",
+                    "couldn't find the article on the page",
+                )
             };
             format!("{note}\n\n{}", with_pictures(md, preview, pictures))
         }
-        Some(Article::Text { md, words }) => {
+        Some(Article::Text { md, words, .. }) => {
             let md = with_pictures(md, preview, pictures);
-            let md = demote_headings(&md, &story.title);
+            let md = demote_headings(&md, title);
             if preview && *words > PREVIEW_WORDS * 3 / 2 {
                 format!(
                     "{}\n\n*… {} min read, `⏎` for the rest*",
@@ -167,9 +216,9 @@ fn article_md(story: &Story, article: Option<&Article>, preview: bool, pictures:
 
 /// A note with a bar down its left, so it isn't read as the article:
 /// `title`, `why`, then the address and, right under it, how to get there.
-fn note(story: &Story, title: &str, why: &str) -> String {
+fn note(url: Option<&str>, title: &str, why: &str) -> String {
     let mut note = format!("> [!NOTE] {title}\n> {}.", escape(&capitalized(why)));
-    if let Some(url) = &story.url {
+    if let Some(url) = url {
         note.push_str(&format!(
             "\n>\n> [{}](<{}>)\\\n> Press `w` to open the website in your browser, or `c` to copy its address.",
             escape(url),
@@ -188,21 +237,39 @@ fn capitalized(s: &str) -> String {
 }
 
 fn with_pictures(md: &str, preview: bool, pictures: Pictures) -> String {
-    let rows = if preview { figure::PREVIEW_ROWS } else { figure::FULL_ROWS };
+    let rows = if preview {
+        figure::PREVIEW_ROWS
+    } else {
+        figure::FULL_ROWS
+    };
     let found = figure::all(md);
-    let shown = if preview { &found[..found.len().min(1)] } else { &found[..] };
+    let shown = if preview {
+        &found[..found.len().min(1)]
+    } else {
+        &found[..]
+    };
     // From the end back, so what's left to do stays where it was found.
     let mut edits: Vec<(usize, Range<usize>, String)> = Vec::new();
     for (i, f) in shown.iter().enumerate() {
         let Some(picture) = pictures(i) else { continue };
         let at = if i == 0 { 0 } else { f.after };
-        edits.push((i, at..at, format!("\n\n{}\n\n", figure::marker(picture, rows, i))));
+        edits.push((
+            i,
+            at..at,
+            format!("\n\n{}\n\n", figure::marker(picture, rows, i)),
+        ));
         edits.push((i, f.at.clone(), String::new()));
     }
     // Where a picture's taken out at the very place one goes in (an article
     // that starts with its first), out before in, or the taking out would
     // cut into what went in.
-    edits.sort_by_key(|(i, range, _)| (std::cmp::Reverse(range.start), std::cmp::Reverse(*i), range.is_empty()));
+    edits.sort_by_key(|(i, range, _)| {
+        (
+            std::cmp::Reverse(range.start),
+            std::cmp::Reverse(*i),
+            range.is_empty(),
+        )
+    });
     let mut md = md.to_string();
     for (_, range, text) in edits {
         md.replace_range(range, &text);
@@ -291,7 +358,11 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
         author(&c.by)
     };
     // The age links to the comment, as on HN: it's what `v` and `r` choose.
-    let when = format!("[{}](<{}> \"muted\")", ago(c.time, context.now), hn::item_url(c.id));
+    let when = format!(
+        "[{}](<{}> \"muted\")",
+        ago(c.time, context.now),
+        hn::item_url(c.id)
+    );
     let new = if context.seen.is_some_and(|seen| c.id > seen) {
         " · `new`"
     } else {
@@ -406,7 +477,12 @@ pub fn user_markdown(name: &str, user: Option<&Result<User, String>>, now: u64) 
 /// The replies to your latest stories and comments, newest first: each
 /// with what it answers, in a bar like a comment in a thread, so `j` and
 /// `k` go from one to the next. Those newer than `seen` are marked new.
-pub fn replies_markdown(name: &str, replies: Option<&Result<Replies, String>>, seen: u64, now: u64) -> String {
+pub fn replies_markdown(
+    name: &str,
+    replies: Option<&Result<Replies, String>>,
+    seen: u64,
+    now: u64,
+) -> String {
     let mut md = format!(
         "# Replies to {}\n\nTo your latest 30 comments and stories, newest first · [on HN](<{}>)\n\n",
         escape(name),
@@ -415,7 +491,11 @@ pub fn replies_markdown(name: &str, replies: Option<&Result<Replies, String>>, s
     let replies = match replies {
         None => return md + "*Loading…*\n",
         Some(Err(e)) => {
-            return md + &format!("> [!NOTE] Couldn't get them\n> {}\n", escape(&capitalized(e)));
+            return md
+                + &format!(
+                    "> [!NOTE] Couldn't get them\n> {}\n",
+                    escape(&capitalized(e))
+                );
         }
         Some(Ok(replies)) => replies,
     };
@@ -423,9 +503,17 @@ pub fn replies_markdown(name: &str, replies: Option<&Result<Replies, String>>, s
         md.push_str("*None yet.*\n");
     }
     for reply in &replies.replies {
-        let when = format!("[{}](<{}> \"muted\")", ago(reply.time, now), hn::item_url(reply.id));
+        let when = format!(
+            "[{}](<{}> \"muted\")",
+            ago(reply.time, now),
+            hn::item_url(reply.id)
+        );
         let new = if reply.id > seen { " · `new`" } else { "" };
-        let who = if reply.by.is_empty() { "*\\[deleted\\]*".to_string() } else { author(&reply.by) };
+        let who = if reply.by.is_empty() {
+            "*\\[deleted\\]*".to_string()
+        } else {
+            author(&reply.by)
+        };
         let mut body = format!("### {who} · {when}{new}\n\n");
         let yours = replies.yours.iter().find(|p| p.id == reply.parent);
         let story = match (reply.story_id, &reply.story_title) {
@@ -433,10 +521,15 @@ pub fn replies_markdown(name: &str, replies: Option<&Result<Replies, String>>, s
             _ => "a story".into(),
         };
         match yours {
-            Some(post) if post.title.is_some() => body.push_str(&format!("On your story {story}\n\n")),
+            Some(post) if post.title.is_some() => {
+                body.push_str(&format!("On your story {story}\n\n"))
+            }
             Some(post) => {
                 body.push_str(&format!("To your comment on {story}:\n\n"));
-                body.push_str(&format!("> *{}*\n\n", excerpt(post.text.as_deref().unwrap_or_default())));
+                body.push_str(&format!(
+                    "> *{}*\n\n",
+                    excerpt(post.text.as_deref().unwrap_or_default())
+                ));
             }
             None => body.push_str(&format!("On {story}\n\n")),
         }
@@ -465,11 +558,13 @@ fn excerpt(html: &str) -> String {
             break;
         }
         len += word.chars().count() + 1;
-        out.push(if word.starts_with("http://") || word.starts_with("https://") {
-            format!("<{word}>")
-        } else {
-            escape(word)
-        });
+        out.push(
+            if word.starts_with("http://") || word.starts_with("https://") {
+                format!("<{word}>")
+            } else {
+                escape(word)
+            },
+        );
     }
     out.join(" ")
 }
@@ -572,7 +667,10 @@ pub fn html_to_md(html: &str) -> String {
             ("b" | "strong", _) => push_raw(&mut out, &mut link, "**"),
             ("a", false) => {
                 finish_link(&mut out, &mut link);
-                link = Some((attr(tag, "href").map(|h| decode(&h)).unwrap_or_default(), String::new()));
+                link = Some((
+                    attr(tag, "href").map(|h| decode(&h)).unwrap_or_default(),
+                    String::new(),
+                ));
             }
             ("a", true) => finish_link(&mut out, &mut link),
             ("pre", false) => {
@@ -621,8 +719,14 @@ fn push_raw(out: &mut String, link: &mut Option<(String, String)>, md: &str) {
 }
 
 fn finish_link(out: &mut String, link: &mut Option<(String, String)>) {
-    let Some((href, text)) = link.take() else { return };
-    let text = if text.trim().is_empty() { href.clone() } else { text };
+    let Some((href, text)) = link.take() else {
+        return;
+    };
+    let text = if text.trim().is_empty() {
+        href.clone()
+    } else {
+        text
+    };
     if href.is_empty() {
         out.push_str(&escape(&text));
     } else {
@@ -631,11 +735,7 @@ fn finish_link(out: &mut String, link: &mut Option<(String, String)>) {
 }
 
 fn code_block(code: &str) -> String {
-    let longest = code
-        .split(|c| c != '`')
-        .map(str::len)
-        .max()
-        .unwrap_or(0);
+    let longest = code.split(|c| c != '`').map(str::len).max().unwrap_or(0);
     let fence = "`".repeat((longest + 1).max(3));
     let code = code.trim_matches('\n');
     format!("\n\n{fence}\n{code}\n{fence}\n\n")
@@ -683,9 +783,9 @@ fn decode(s: &str) -> String {
             "quot" => Some('"'),
             "apos" => Some('\''),
             "nbsp" => Some(' '),
-            e if e.starts_with("#x") || e.starts_with("#X") => {
-                u32::from_str_radix(&e[2..], 16).ok().and_then(char::from_u32)
-            }
+            e if e.starts_with("#x") || e.starts_with("#X") => u32::from_str_radix(&e[2..], 16)
+                .ok()
+                .and_then(char::from_u32),
             e if e.starts_with('#') => e[1..].parse().ok().and_then(char::from_u32),
             _ => None,
         };
@@ -750,7 +850,10 @@ mod tests {
 
     #[test]
     fn decodes_references() {
-        assert_eq!(decode("a &amp; b &#x27;c&#39; &bogus; &"), "a & b 'c' &bogus; &");
+        assert_eq!(
+            decode("a &amp; b &#x27;c&#39; &bogus; &"),
+            "a & b 'c' &bogus; &"
+        );
         // Not a reference, just before text that isn't ASCII.
         assert_eq!(decode("Q&A’s ’’’’ &amp;"), "Q&A’s ’’’’ &");
     }
@@ -759,21 +862,53 @@ mod tests {
     fn replies_say_what_they_answer_and_which_are_new() {
         let replies = Replies {
             replies: vec![
-                hn::Reply { id: 30, by: "bob".into(), text: "Agreed.".into(), time: 0, parent: 10, story_id: Some(1), story_title: Some("A story".into()) },
-                hn::Reply { id: 20, by: "carol".into(), text: "Nice work".into(), time: 0, parent: 1, story_id: Some(1), story_title: Some("A story".into()) },
+                hn::Reply {
+                    id: 30,
+                    by: "bob".into(),
+                    text: "Agreed.".into(),
+                    time: 0,
+                    parent: 10,
+                    story_id: Some(1),
+                    story_title: Some("A story".into()),
+                },
+                hn::Reply {
+                    id: 20,
+                    by: "carol".into(),
+                    text: "Nice work".into(),
+                    time: 0,
+                    parent: 1,
+                    story_id: Some(1),
+                    story_title: Some("A story".into()),
+                },
             ],
             yours: vec![
-                hn::Post { id: 10, text: Some("I think <i>so</i>".into()), story_id: Some(1), ..Default::default() },
-                hn::Post { id: 1, title: Some("A story".into()), ..Default::default() },
+                hn::Post {
+                    id: 10,
+                    text: Some("I think <i>so</i>".into()),
+                    story_id: Some(1),
+                    ..Default::default()
+                },
+                hn::Post {
+                    id: 1,
+                    title: Some("A story".into()),
+                    ..Default::default()
+                },
             ],
         };
         let md = replies_markdown("me", Some(&Ok(replies)), 25, 0);
         assert!(md.starts_with("# Replies to me\n"), "{md}");
         assert!(md.contains("> To your comment on [A story]"), "{md}");
         assert!(md.contains("> > *I think so*"), "{md}");
-        assert_eq!(excerpt("see https://x.com/a_b.c and *this*"), "see <https://x.com/a_b.c> and \\*this\\*");
+        assert_eq!(
+            excerpt("see https://x.com/a_b.c and *this*"),
+            "see <https://x.com/a_b.c> and \\*this\\*"
+        );
         assert!(md.contains("> On your story [A story]"), "{md}");
-        assert_eq!(md.matches("`new`").count(), 1, "only the one after 25: {md}");
+        assert_eq!(
+            md.matches("`new`").count(),
+            1,
+            "only the one after 25: {md}"
+        );
         let doc = crate::render::render(&md, 60, &crate::theme::Theme::plain(), None, None);
         assert_eq!(doc.comments.len(), 2, "j and k go from one to the next");
     }
@@ -795,10 +930,35 @@ mod tests {
             replies: vec![reply],
         }];
         let folded = HashSet::from([1]);
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &folded }, &|_| None);
+        let md = markdown(
+            &story(),
+            None,
+            Comments::Loaded(&comments),
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &folded,
+            },
+            &|_| None,
+        );
         assert!(md.contains("· ▸ 1 more"), "{md}");
-        assert!(!md.contains("the comment") && !md.contains("the reply"), "{md}");
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        assert!(
+            !md.contains("the comment") && !md.contains("the reply"),
+            "{md}"
+        );
+        let md = markdown(
+            &story(),
+            None,
+            Comments::Loaded(&comments),
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
         assert!(md.contains("the comment") && md.contains("the reply") && !md.contains("▸"));
     }
 
@@ -817,7 +977,18 @@ mod tests {
                 replies: vec![],
             }],
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 10_000 + 3600, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        let md = markdown(
+            &story(),
+            None,
+            Comments::Loaded(&comments),
+            false,
+            10_000 + 3600,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
         assert!(md.starts_with("# Show HN: A \\*thing\\*\n"), "{md}");
         assert!(md.contains("[example\\.com](<https://www.example.com/post>) · [42 points](<https://news.ycombinator.com/item?id=7> \"muted\")"), "{md}");
         assert!(md.contains("*Loading the article…*"));
@@ -826,7 +997,11 @@ mod tests {
         assert!(md.contains("> > **[alice](<https://news.ycombinator.com/user?id=alice>) (OP)** · [1h ago](<https://news.ycombinator.com/item?id=2> \"muted\")\n> >\n> > reply\n"), "{md}");
         // Still headings, in their bars, for `]` and `[`.
         let doc = crate::render::render(&md, 80, &crate::theme::Theme::plain(), None, None);
-        assert!(doc.headings.iter().any(|h| h.level == 3 && h.text.starts_with("bob")));
+        assert!(
+            doc.headings
+                .iter()
+                .any(|h| h.level == 3 && h.text.starts_with("bob"))
+        );
     }
 
     #[test]
@@ -844,12 +1019,42 @@ mod tests {
             replies: vec![reply],
             ..Comment::default()
         }];
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: Some(20), folded: &HashSet::new() }, &|_| None);
+        let md = markdown(
+            &story(),
+            None,
+            Comments::Loaded(&comments),
+            false,
+            0,
+            Marks {
+                seen: Some(20),
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
         assert!(md.contains("## Comments (2, 1 new)"), "{md}");
-        assert!(md.contains("id=bob>) · [now](<https://news.ycombinator.com/item?id=10> \"muted\")\n"), "{md}");
-        assert!(md.contains("id=carol>)** · [now](<https://news.ycombinator.com/item?id=30> \"muted\") · `new`"), "{md}");
+        assert!(
+            md.contains("id=bob>) · [now](<https://news.ycombinator.com/item?id=10> \"muted\")\n"),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "id=carol>)** · [now](<https://news.ycombinator.com/item?id=30> \"muted\") · `new`"
+            ),
+            "{md}"
+        );
         // Never read: nothing's new.
-        let md = markdown(&story(), None, Comments::Loaded(&comments), false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        let md = markdown(
+            &story(),
+            None,
+            Comments::Loaded(&comments),
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
         assert!(!md.contains("`new`") && !md.contains("new)"), "{md}");
     }
 
@@ -880,25 +1085,69 @@ mod tests {
         let md = user_markdown("pg", Some(&Ok(user)), 0);
         assert!(md.starts_with("# pg\n\n10 karma · joined now"), "{md}");
         assert!(md.contains("Bug fixer\\."));
-        assert!(md.contains("> ### On [An essay](<https://news.ycombinator.com/item?id=1>) · now\n>\n> A reply"), "{md}");
-        assert!(md.contains("### [An essay](<https://news.ycombinator.com/item?id=1>)\n\n5 points · 3 comments"), "{md}");
+        assert!(
+            md.contains(
+                "> ### On [An essay](<https://news.ycombinator.com/item?id=1>) · now\n>\n> A reply"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "### [An essay](<https://news.ycombinator.com/item?id=1>)\n\n5 points · 3 comments"
+            ),
+            "{md}"
+        );
         assert!(user_markdown("pg", None, 0).contains("Loading"));
     }
 
     #[test]
     fn unreadable_articles_say_why_and_where_they_are() {
         let article = Article::Unreadable("the page is gone".into());
-        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
-        assert!(md.contains("> [!NOTE] Couldn't read the article\n> The page is gone."), "{md}");
+        let md = markdown(
+            &story(),
+            Some(&article),
+            Comments::Loading,
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
+        assert!(
+            md.contains("> [!NOTE] Couldn't read the article\n> The page is gone."),
+            "{md}"
+        );
         assert!(
             md.contains("> [https://www\\.example\\.com/post](<https://www.example.com/post>)\\\n> Press `w` to open the website"),
             "{md}"
         );
         // A page drawn by its scripts says so, and what it's about.
-        let article = Article::About { scripted: true, md: "A tale".into() };
-        let md = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
-        assert!(md.contains("> [!NOTE] This page shows its text with JavaScript"), "{md}");
-        assert!(md.contains("Press `w` to open the website") && md.contains("\n\nA tale"), "{md}");
+        let article = Article::About {
+            scripted: true,
+            md: "A tale".into(),
+        };
+        let md = markdown(
+            &story(),
+            Some(&article),
+            Comments::Loading,
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
+        assert!(
+            md.contains("> [!NOTE] This page shows its text with JavaScript"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Press `w` to open the website") && md.contains("\n\nA tale"),
+            "{md}"
+        );
     }
 
     #[test]
@@ -913,12 +1162,18 @@ mod tests {
         // Only what's been fetched; the rest stay links for now.
         let first = |i| (i == 0).then_some(&picture);
         let shown = with_pictures(md, false, &first);
-        assert!(shown.contains("![two]") && !shown.contains("![one]"), "{shown}");
+        assert!(
+            shown.contains("![two]") && !shown.contains("![one]"),
+            "{shown}"
+        );
         // Previews have only the first.
         assert!(!with_pictures(md, true, &both).contains("image: 400 200 12 1"));
         // An article that starts with its picture.
         let md = "![one](https://x.com/1.jpg)\n\nIntro.";
-        assert_eq!(with_pictures(md, false, &both), "<!-- image: 400 200 24 0 -->\n\n\n\nIntro.");
+        assert_eq!(
+            with_pictures(md, false, &both),
+            "<!-- image: 400 200 24 0 -->\n\n\n\nIntro."
+        );
     }
 
     #[test]
@@ -930,14 +1185,40 @@ mod tests {
         let article = Article::Text {
             md: format!("# Show HN: A *thing*\n\n{md}"),
             words: 280,
+            title: String::new(),
         };
-        let full = markdown(&story(), Some(&article), Comments::Loading, false, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
-        let preview = markdown(&story(), Some(&article), Comments::Loading, true, 0, Marks { seen: None, folded: &HashSet::new() }, &|_| None);
+        let full = markdown(
+            &story(),
+            Some(&article),
+            Comments::Loading,
+            false,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
+        let preview = markdown(
+            &story(),
+            Some(&article),
+            Comments::Loading,
+            true,
+            0,
+            Marks {
+                seen: None,
+                folded: &HashSet::new(),
+            },
+            &|_| None,
+        );
         assert!(full.contains("Paragraph 39"));
         assert!(!preview.contains("Paragraph 39"));
         assert!(preview.contains("min read"));
         // The article's own copy of the title is dropped.
-        assert_eq!(full.matches("A *thing*").count() + full.matches("A \\*thing\\*").count(), 1);
+        assert_eq!(
+            full.matches("A *thing*").count() + full.matches("A \\*thing\\*").count(),
+            1
+        );
     }
 
     #[test]

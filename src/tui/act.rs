@@ -4,12 +4,13 @@
 //! what was being done carries on once it's there.
 
 use super::compose::TextBox;
+use super::nav::Page;
 use super::nav::{Prompt, Purpose};
 use super::{App, Asked, Focus};
 use crate::auth::{self, Form, Session};
 use crate::fetch::Job;
 use crate::session::{self, Saved};
-use crate::{editor, hn, story, store};
+use crate::{editor, hn, store, story};
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style, Stylize};
@@ -110,10 +111,10 @@ impl App {
     /// the story. `None` on someone's page, where there's no telling.
     pub(super) fn acting_on(&mut self) -> Option<u64> {
         let reader = self.focus == Focus::Reader || self.kept();
-        if reader && self.user_page.as_deref() == Some(super::REPLIES) {
+        if reader && self.page == Some(Page::Replies) {
             return Some(self.current()?.focused()?.id);
         }
-        if reader && self.user_page.is_some() {
+        if reader && self.page.is_some() {
             return None;
         }
         let (story, _) = self.current_key()?;
@@ -199,7 +200,9 @@ impl App {
                 let (who, quoted) = self.said(id);
                 let dir = store::dir().unwrap_or_else(std::env::temp_dir);
                 let path = dir.join("drafts").join(format!("reply-{id}.txt"));
-                let kept = std::fs::read_to_string(&path).map(|t| auth::reply_text(&t)).unwrap_or_default();
+                let kept = std::fs::read_to_string(&path)
+                    .map(|t| auth::reply_text(&t))
+                    .unwrap_or_default();
                 let story = self.story_on_screen().unwrap_or(id);
                 // What's being answered stays in view above the box.
                 if let Some(doc) = self.current()
@@ -230,7 +233,7 @@ impl App {
 
     /// The story being read or previewed.
     fn story_on_screen(&mut self) -> Option<u64> {
-        if self.user_page.as_deref() == Some(super::REPLIES) {
+        if self.page == Some(Page::Replies) {
             let id = self.current()?.focused()?.id;
             return self.reply_to_you(id)?.story_id;
         }
@@ -390,7 +393,11 @@ impl App {
             _ if press && c.on == On::Cancel => return self.keep_reply(&c),
             _ if press && c.on == On::Post => return self.post_reply(c),
             KeyCode::Left | KeyCode::Right => {
-                c.on = if c.on == On::Cancel { On::Post } else { On::Cancel };
+                c.on = if c.on == On::Cancel {
+                    On::Post
+                } else {
+                    On::Cancel
+                };
             }
             _ => {}
         }
@@ -453,7 +460,12 @@ impl App {
             self.prompt = Some(Prompt::Compose(c));
             return;
         };
-        let job = Job::Post(session.clone(), form.clone(), c.text.text().trim().to_string(), c.story);
+        let job = Job::Post(
+            session.clone(),
+            form.clone(),
+            c.text.text().trim().to_string(),
+            c.story,
+        );
         self.posting = Some(c.path.clone());
         self.flash = Some("Posting…".into());
         self.send(job, true);
@@ -506,20 +518,27 @@ impl App {
                 if let Some(path) = draft {
                     let _ = std::fs::remove_file(path);
                 }
-                self.flash =
-                    Some("Posted. It shows here once HN's search has it, usually within a minute".into());
+                self.flash = Some(
+                    "Posted. It shows here once HN's search has it, usually within a minute".into(),
+                );
                 // Fetch the thread again, for it.
                 self.asked.remove(&Asked::Thread(story));
             }
             Err(e) => {
-                self.flash = Some(format!("Not posted: {e}. Your reply's kept: r to try again"));
+                self.flash = Some(format!(
+                    "Not posted: {e}. Your reply's kept: r to try again"
+                ));
             }
         }
     }
 
     /// Hands the reply to the editor, with what it's replying to below a
     /// line, and back to the box with what was written.
-    pub(super) fn edit_reply(&mut self, terminal: &mut DefaultTerminal, mut c: Box<Compose>) -> std::io::Result<()> {
+    pub(super) fn edit_reply(
+        &mut self,
+        terminal: &mut DefaultTerminal,
+        mut c: Box<Compose>,
+    ) -> std::io::Result<()> {
         let text = format!("{}{}", c.text.text(), auth::draft(&c.who, &c.quoted));
         let written = save_draft(&c.path, &text);
         let result = match written {
@@ -545,7 +564,9 @@ impl App {
             return;
         };
         let area = f.area();
-        let height = (area.height * 2 / 5).clamp(7, 18).min(area.height.saturating_sub(2));
+        let height = (area.height * 2 / 5)
+            .clamp(7, 18)
+            .min(area.height.saturating_sub(2));
         let rect = Rect {
             x: area.x + 1,
             // Above the footer.
@@ -575,10 +596,16 @@ impl App {
         };
         c.text.draw(f, text_area, c.on == On::Text);
         c.text_at = text_area;
-        let accent = frame.map_or(Style::new().reversed(), |c| Style::new().fg(Color::Black).bg(c));
+        let accent = frame.map_or(Style::new().reversed(), |c| {
+            Style::new().fg(Color::Black).bg(c)
+        });
         let button = |label: &str, on: bool| {
             let span = Span::raw(format!(" {label} "));
-            if on { span.style(accent.bold()) } else { span.style(Style::new().bold().reversed()) }
+            if on {
+                span.style(accent.bold())
+            } else {
+                span.style(Style::new().bold().reversed())
+            }
         };
         let buttons = Line::from(vec![
             button("Cancel", c.on == On::Cancel),
@@ -668,9 +695,13 @@ fn edit(text: &mut String, key: KeyEvent, ctrl: bool) {
 
 /// Comment `id`, among these and their replies.
 pub(super) fn find(comments: &[hn::Comment], id: u64) -> Option<&hn::Comment> {
-    comments
-        .iter()
-        .find_map(|c| if c.id == id { Some(c) } else { find(&c.replies, id) })
+    comments.iter().find_map(|c| {
+        if c.id == id {
+            Some(c)
+        } else {
+            find(&c.replies, id)
+        }
+    })
 }
 
 #[cfg(test)]
@@ -682,7 +713,12 @@ mod tests {
     use ratatui::crossterm::event::KeyModifiers;
 
     fn app() -> App {
-        let mut app = App::new(Theme::plain(), None, Fetcher::start(Cache::none()), SeenStore::load(None, 0));
+        let mut app = App::new(
+            Theme::plain(),
+            None,
+            Fetcher::start(Cache::none()),
+            SeenStore::load(None, 0),
+        );
         // Never the real keyring, in tests.
         app.auth = Auth::Out;
         app
@@ -710,8 +746,17 @@ mod tests {
         assert_eq!(user, "pg");
         type_in(&mut app, "secret");
         // The password never shows.
-        let footer: String = app.act_footer().unwrap().spans.iter().map(|s| s.content.to_string()).collect();
-        assert!(footer.contains("••••••") && !footer.contains("secret"), "{footer}");
+        let footer: String = app
+            .act_footer()
+            .unwrap()
+            .spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect();
+        assert!(
+            footer.contains("••••••") && !footer.contains("secret"),
+            "{footer}"
+        );
         // Esc gives up on the login and what was waiting for it.
         app.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         assert!(app.prompt.is_none() && app.pending.is_none());
@@ -756,7 +801,11 @@ mod tests {
         app.key(key(KeyCode::Right));
         assert_eq!(compose(&app).1, On::Post);
         app.key(key(KeyCode::Char('x')));
-        assert_eq!(compose(&app).0, "Hi q\n", "on a button, typing doesn't write");
+        assert_eq!(
+            compose(&app).0,
+            "Hi q\n",
+            "on a button, typing doesn't write"
+        );
         app.key(key(KeyCode::Tab));
         assert_eq!(compose(&app).1, On::Text);
         // Cancel keeps it for later.
@@ -768,7 +817,9 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "Hi q\n");
         // Posting before HN's form is here: it waits for it.
         open(&mut app, "Hi");
-        app.auth = Auth::In(Session { cookie: "bob&x".into() });
+        app.auth = Auth::In(Session {
+            cookie: "bob&x".into(),
+        });
         app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         assert!(compose(&app).2, "waiting for the form");
         // An empty box leaves no draft behind.

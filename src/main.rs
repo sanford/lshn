@@ -156,7 +156,9 @@ fn run(args: Args) -> io::Result<()> {
             return print_story(*id, &theme, width.unwrap_or_else(terminal_width));
         }
         Some(hn::Link::User(_)) if !interactive => {
-            return Err(io::Error::other("someone's page is only for reading here, in a terminal"));
+            return Err(io::Error::other(
+                "someone's page is only for reading here, in a terminal",
+            ));
         }
         _ => {}
     }
@@ -200,13 +202,18 @@ fn edit_config() -> io::Result<()> {
 /// title and link, separated by tabs.
 fn list(feed: Feed) -> io::Result<()> {
     let ids = match feed {
-        Feed::Saved => store::Marked::load(store::dir().as_deref(), "saved", None, 0).newest_first(),
+        Feed::Saved => {
+            store::Marked::load(store::dir().as_deref(), "saved", None, 0).newest_first()
+        }
         _ => hn::feed(feed).map_err(io::Error::other)?,
     };
     let ids: Vec<u64> = ids.into_iter().take(30).collect();
     // All at once, then in order.
     let stories: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = ids.iter().map(|&id| s.spawn(move || hn::story(id))).collect();
+        let handles: Vec<_> = ids
+            .iter()
+            .map(|&id| s.spawn(move || hn::story(id)))
+            .collect();
         handles.into_iter().map(|h| h.join().ok()).collect()
     });
     let mut out = io::stdout().lock();
@@ -234,7 +241,10 @@ fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
     }
     let id = story.id;
     let (article, thread) = std::thread::scope(|s| {
-        let article = story.url.as_deref().map(|url| s.spawn(|| article::fetch(url)));
+        let article = story
+            .url
+            .as_deref()
+            .map(|url| s.spawn(|| article::fetch(url)));
         let thread = hn::thread(id, &story.kids);
         (article.and_then(|a| a.join().ok()), thread)
     });
@@ -245,7 +255,18 @@ fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs());
-    let md = story::markdown(&story, article.as_ref(), comments, false, now, story::Marks { seen: None, folded: &Default::default() }, &|_| None);
+    let md = story::markdown(
+        &story,
+        article.as_ref(),
+        comments,
+        false,
+        now,
+        story::Marks {
+            seen: None,
+            folded: &Default::default(),
+        },
+        &|_| None,
+    );
     let mut lines = render::render(&md, width, theme, None, None).lines;
     for span in lines.iter_mut().flat_map(|l| &mut l.spans) {
         span.style = theme.recolor(span.style);

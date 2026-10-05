@@ -3,7 +3,7 @@
 //! covers.
 
 use super::nav::Prompt;
-use super::{App, Focus};
+use super::{App, Focus, HeaderHit};
 use crate::hn::Feed;
 use ratatui::crossterm::event::{
     KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -105,7 +105,9 @@ impl App {
                     self.prompt = None;
                 }
                 let list = self.focus == Focus::List;
-                let Some(doc) = self.current() else { return false };
+                let Some(doc) = self.current() else {
+                    return false;
+                };
                 doc.selection = None;
                 if !doc.contains(x, y) {
                     return false;
@@ -122,7 +124,9 @@ impl App {
                 true
             }
             MouseEventKind::Drag(MouseButton::Left) => {
-                let Some((from, _)) = self.press else { return false };
+                let Some((from, _)) = self.press else {
+                    return false;
+                };
                 self.press = Some((from, true));
                 if let Some(doc) = self.current() {
                     doc.select_to(from, x, y);
@@ -130,7 +134,9 @@ impl App {
                 true
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                let Some((_, dragged)) = self.press.take() else { return false };
+                let Some((_, dragged)) = self.press.take() else {
+                    return false;
+                };
                 if dragged {
                     let text = self.current().and_then(|d| d.selected_text());
                     if let Some(text) = text {
@@ -145,26 +151,32 @@ impl App {
         }
     }
 
-    /// A click on a story in the list selects it, or opens it if it was
-    /// already selected.
     /// `lshn` in the header goes back to the list, and to the first tab
-    /// (Top) from another; a tab, to what its key does.
-    fn click_header(&mut self, x: u16, y: u16) {
+    /// (Top) from another; a tab, to what its key does; `esc Back`, back
+    /// where the last link was followed from.
+    pub(super) fn click_header(&mut self, x: u16, y: u16) {
         let (row, hits) = &self.header_hits;
-        let hit = hits.iter().find(|(from, to, _)| y == *row && (*from..*to).contains(&x));
+        let hit = hits
+            .iter()
+            .find(|(from, to, _)| y == *row && (*from..*to).contains(&x));
         let home = self.feed == Feed::ALL[0] && self.search.is_none();
         match hit.map(|h| h.2) {
-            Some(None) if !home => {
+            Some(HeaderHit::Home) if !home => {
                 self.key(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::NONE));
             }
-            Some(None) if self.focus == Focus::Reader => self.leave_reader(),
-            Some(Some(c)) => {
+            Some(HeaderHit::Home) if self.focus == Focus::Reader => self.leave_reader(),
+            Some(HeaderHit::Key(c)) => {
                 self.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+            }
+            Some(HeaderHit::Back) => {
+                self.go_back();
             }
             _ => {}
         }
     }
 
+    /// A click on a story in the list selects it, or opens it if it was
+    /// already selected.
     fn click_list(&mut self, y: u16) {
         // Stories take a row or more each: count down from the top one.
         let mut row = usize::from(y.saturating_sub(self.list_area.y));

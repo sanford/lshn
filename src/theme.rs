@@ -148,7 +148,11 @@ impl Theme {
         match choice {
             Choice::Named(name) => {
                 let mut theme = Theme::painted(&palettes::palette(name), color);
-                if let Some(paint) = theme.paint.as_mut().filter(|_| !palettes::paints_background(name)) {
+                if let Some(paint) = theme
+                    .paint
+                    .as_mut()
+                    .filter(|_| !palettes::paints_background(name))
+                {
                     paint.bg = Color::Reset;
                 }
                 theme
@@ -169,7 +173,6 @@ impl Theme {
                 fg: rgb(palette.foreground()),
                 bg: rgb(palette.background()),
             });
-
         }
         theme
     }

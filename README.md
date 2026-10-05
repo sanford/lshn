@@ -47,7 +47,7 @@ cargo build --release
 ./target/release/lshn
 ```
 
-While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1 [ARGS]` on Windows) builds, installs to `~/.local/bin`, and runs in one step.
+While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1 [ARGS]` on Windows) formats the code, builds, installs to `~/.local/bin`, and runs in one step.
 
 ## Usage
 
@@ -96,7 +96,7 @@ Reading:
 | `O` | Keep the outline open beside the story |
 | `/` `n` `N` | Search the story; next and previous match |
 | `f` | Follow a link: type the letters drawn on it |
-| `Enter` | Beside the list, the story full screen; full screen, back to the list, where you were, with the story beside it |
+| `Enter` | On a highlighted link, follow it. Otherwise: beside the list, the story full screen; full screen, back to the list, where you were, with the story beside it |
 | `Esc` `←` `h` `Backspace` | Back to where you followed a link from, then to the list. `←` never quits, however many times you press it |
 | `Ctrl-J` `Ctrl-K` (or `Ctrl-↓` `Ctrl-↑`, `⇧↓` `⇧↑`, `>` `<`) | Next and previous story: what `↓` and `↑` do in the list |
 | `\` | Keep the list on screen while reading |
@@ -105,7 +105,7 @@ Anywhere:
 
 | Key | |
 |---|---|
-| `w` `W` | Open the story's link, or its HN page, in the browser. On a link in a comment, `w` opens that |
+| `w` `W` | Open the story's link, or its HN page, in the browser. On a highlighted link, `w` opens that |
 | `c` | Copy: a menu saying just what each choice copies — the story's link, its HN page, a Markdown link to it, the comment being read or a link to it, or the article. `v` there selects lines from the keyboard: `j` `k` for more or less, then `c` |
 | `v` | Upvote: in the list, the selected story; reading, the comment being read, or above the comments, the story. Again takes the vote back |
 | `r` | Reply to the same, in a box over the bottom of the screen |
@@ -119,11 +119,13 @@ Anywhere:
 
 `Home` `End` `PgUp` `PgDn` do what they say. Emacs keys work too: `Ctrl-N` `Ctrl-P`, `Ctrl-V` `Alt-V`, `Alt-<` `Alt->`, `Ctrl-G`, and `Ctrl-S` `Ctrl-R` to search.
 
-So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), reads the story shown beside the list, follows a link, jumps through the scrollbar, or goes to a place in the outline. In the header, clicking `lshn` goes back to the list, on the first tab (Top), and clicking a tab (`2 New`, `s Search`, …) does what its key does. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
+So does the mouse: the wheel scrolls whatever's under it, a click selects a story (and a second click reads it), reads the story shown beside the list, follows a link, jumps through the scrollbar, or goes to a place in the outline. In the header, clicking `lshn` goes back to the list, on the first tab (Top), clicking a tab (`2 New`, `s Search`, …) does what its key does, and after following a link, clicking `esc Back` goes back a page. Dragging over the text copies it when you let go, as plain text: without the bars beside comments, paragraphs whole however they're wrapped, and links that show an address, often cut short, as the whole address.
 
 ### Following links
 
-Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments; a link to a comment opens its story there, with the comment selected. `Esc` goes back the way you came, each page where you left it. Other links open in the browser, after you say yes (or `c` copies the address).
+Every author's name is a link: follow it (`f`, or click) for their page — karma, when they joined, what they say about themselves, and what they've posted lately, with `]` `[` going from post to post. Links to stories on HN open here too, rather than in the browser, and a story's own "comments" link goes to its comments; a link to a comment opens its story there, with the comment selected. Other links are read here too, the way a story's article is: the page's text, its pictures, its headings in the outline, and its own links to follow on. `Esc` (or clicking `esc Back` in the header) goes back the way you came, each page where you left it. `w` opens the page in the browser instead, as it does videos and posts on X, which have nothing to read here; `c` copies its address, or the article.
+
+Reading the article, the link you're reading by is highlighted, ready for `Enter` (or `w`, or `c`). It's the one nearest a band a third of the way down the screen, which starts at the top of the screen and ends at the bottom, so even the first and last links get their turn. `↓` and `↑` scroll as usual, but where links come close together, side by side on a line or a line after another, they go link to link first, so none is skipped. `f` or a click still gets any link at once.
 
 ### Voting and replying
 

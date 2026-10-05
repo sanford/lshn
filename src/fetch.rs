@@ -9,10 +9,10 @@
 //! follows, and goes in the cache. Articles don't change, so a cached one
 //! isn't fetched again.
 
-use crate::article::{self, Article};
+use crate::article::{self, Article, Source};
 use crate::auth::{self, Form, Session};
-use crate::hn::{self, Comment, Feed, Replies, Story, User};
 use crate::figure;
+use crate::hn::{self, Comment, Feed, Replies, Story, User};
 use crate::store::Cache;
 use image::DynamicImage;
 use std::collections::VecDeque;
@@ -38,9 +38,10 @@ pub enum Job {
     StoryOf(u64),
     /// A story's comments, with its top-level ones in HN's order.
     Thread(u64, Vec<u64>),
-    Article(u64, String),
-    /// A picture in a story's article: which one, and its address.
-    Figure(u64, usize, String),
+    /// An article, and the address it's at.
+    Article(Source, String),
+    /// A picture in an article: which one, and its address.
+    Figure(Source, usize, String),
     /// Someone's profile and latest posts.
     User(String),
     /// The replies to someone's latest posts.
@@ -61,8 +62,8 @@ pub enum Got {
     /// The story comment `.0` is on.
     StoryOf(u64, Result<u64, String>),
     Thread(u64, Result<Vec<Comment>, String>),
-    Article(u64, Article),
-    Figure(u64, usize, Result<DynamicImage, String>),
+    Article(Source, Article),
+    Figure(Source, usize, Result<DynamicImage, String>),
     User(String, Result<User, String>),
     Replies(String, Result<Replies, String>),
     LoggedIn(Result<Session, String>),
@@ -267,9 +268,10 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
         }
         Job::Login(user, password) => send(Got::LoggedIn(auth::login(&user, &password)), true),
         Job::Upvote(session, id) => send(Got::Upvoted(auth::upvote(&session, id)), true),
-        Job::ReplyForm(session, id, is_story) => {
-            send(Got::ReplyForm(id, auth::reply_form(&session, id, is_story)), true)
-        }
+        Job::ReplyForm(session, id, is_story) => send(
+            Got::ReplyForm(id, auth::reply_form(&session, id, is_story)),
+            true,
+        ),
         Job::Post(session, form, text, story) => {
             send(Got::Posted(story, auth::post(&session, &form, &text)), true)
         }
@@ -293,8 +295,8 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             }
             send(Got::Replies(name, fresh), true)
         }
-        Job::Figure(id, index, url) => {
-            let key = format!("{id}-{index}");
+        Job::Figure(source, index, url) => {
+            let key = format!("{}-{index}", source.key());
             let picture = match cache.get_bytes("figure", &key) {
                 Some(bytes) => figure::decode(&bytes),
                 None => figure::download(&url).and_then(|bytes| {
@@ -303,18 +305,19 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
                     Ok(picture)
                 }),
             };
-            send(Got::Figure(id, index, picture), true)
+            send(Got::Figure(source, index, picture), true)
         }
-        Job::Article(id, url) => {
-            if let Some(article) = cache.get(ARTICLES, &id.to_string()) {
-                return send(Got::Article(id, article), true);
+        Job::Article(source, url) => {
+            let key = source.key();
+            if let Some(article) = cache.get(ARTICLES, &key) {
+                return send(Got::Article(source, article), true);
             }
             let article = article::fetch(&url);
             // What couldn't be read may be readable next time.
             if matches!(article, Article::Text { .. }) {
-                cache.put(ARTICLES, &id.to_string(), &article);
+                cache.put(ARTICLES, &key, &article);
             }
-            send(Got::Article(id, article), true)
+            send(Got::Article(source, article), true)
         }
     }
 }
