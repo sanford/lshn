@@ -6,6 +6,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 bin_dir="$HOME/.local/bin"
 
+# Formatted as CI checks it is.
+cargo fmt
 # Not quiet: after a change the build takes a few seconds, and cargo's
 # progress shows that's what the wait is.
 cargo build --release

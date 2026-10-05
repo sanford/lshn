@@ -1,7 +1,7 @@
 name: CI
 
-# Windows only: macOS is where lshn's made and tried, and the release
-# workflow builds and tests each release on Linux.
+# Windows, and formatting: macOS is where lshn's made and tried, and the
+# release workflow builds and tests each release on Linux.
 #
 # Pushes only, never pull requests: the job runs on a self-hosted runner, and
 # this repo is public, so code from forks must never reach it. (Pushes to a
@@ -14,6 +14,14 @@ permissions:
   contents: read
 
 jobs:
+  # The code as rustfmt has it (`cargo fmt`; run.sh does it as it builds).
+  # On GitHub's runner: it runs nothing from the code, and needs no approval.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5
+      - run: cargo fmt --check
+
   # Runs the owners start (a push, a manual run, a re-run) go straight
   # through. Anyone else's wait here, on a GitHub-hosted runner, until an
   # owner approves them in the `approval` environment. The owners' accounts

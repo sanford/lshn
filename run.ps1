@@ -5,6 +5,9 @@ $ErrorActionPreference = 'Stop'
 Set-Location $PSScriptRoot
 $binDir = Join-Path $HOME '.local\bin'
 
+# Formatted as CI checks it is.
+cargo fmt
+if ($LASTEXITCODE) { exit $LASTEXITCODE }
 cargo build --release
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 New-Item -ItemType Directory -Force $binDir | Out-Null
