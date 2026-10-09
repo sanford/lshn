@@ -2,6 +2,8 @@
 //! Markdown, the way a browser's reader mode does.
 
 use crate::hn;
+use crate::plain::{self, Kind};
+use crate::sites;
 use dom_query::{Document, NodeRef};
 use dom_smoothie::{Config, Readability, TextMode};
 
@@ -84,13 +86,43 @@ pub fn fetch(url: &str) -> Article {
     if let Some(what) = not_article(url) {
         return Article::Unreadable(what.into());
     }
-    match fetch_html(url) {
-        Ok(html) => extract(&html, url),
+    // A paper's whole text, rather than its abstract or a PDF; not every
+    // paper has one.
+    if let Some(full) = full_text(url)
+        && let Ok((Kind::Html, html)) = fetch_page(&full)
+    {
+        return extract(&html, &full);
+    }
+    match fetch_page(url) {
+        Ok((Kind::Html, html)) => extract(&html, url),
+        Ok((Kind::Markdown, md)) => plain::markdown(&md, url),
+        Ok((Kind::Text, text)) => plain::text(&text),
         Err(why) => Article::Unreadable(why),
     }
 }
 
-fn fetch_html(url: &str) -> Result<String, String> {
+/// Where a paper's whole text is, as a page, for a link to its abstract or
+/// its PDF: arXiv makes HTML of most papers from their LaTeX.
+fn full_text(url: &str) -> Option<String> {
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))?;
+    let rest = rest.strip_prefix("www.").unwrap_or(rest);
+    let path = rest
+        .strip_prefix("arxiv.org/")
+        .or_else(|| rest.strip_prefix("export.arxiv.org/"))?;
+    let path = path.split(['?', '#']).next()?;
+    let id = path
+        .strip_prefix("abs/")
+        .or_else(|| path.strip_prefix("pdf/"))?
+        .trim_end_matches('/');
+    let id = id.strip_suffix(".pdf").unwrap_or(id);
+    (!id.is_empty()).then(|| format!("https://arxiv.org/html/{id}"))
+}
+
+/// The page at `url`, and what it is: HTML, or Markdown or plain text,
+/// which are read too.
+fn fetch_page(url: &str) -> Result<(Kind, String), String> {
     let mut response = hn::agent().get(url).call().map_err(|e| match e {
         ureq::Error::StatusCode(404 | 410) => "the page is gone".to_string(),
         ureq::Error::StatusCode(401 | 403) => "the site wouldn't let lshn in".to_string(),
@@ -103,7 +135,12 @@ fn fetch_html(url: &str) -> Result<String, String> {
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_ascii_lowercase();
-    if !kind.is_empty() && !kind.contains("html") {
+    let readable = kind.is_empty()
+        || kind.contains("html")
+        || ["text/plain", "text/markdown", "text/x-markdown"]
+            .iter()
+            .any(|k| kind.starts_with(k));
+    if !readable {
         return Err(describe(&kind));
     }
     let bytes = response
@@ -112,7 +149,8 @@ fn fetch_html(url: &str) -> Result<String, String> {
         .limit(MAX_PAGE)
         .read_to_vec()
         .map_err(|e| e.to_string())?;
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    Ok((plain::kind(&kind, url, &body), body))
 }
 
 /// What a page that isn't HTML is, from its content type.
@@ -123,7 +161,6 @@ fn describe(kind: &str) -> String {
         k if k.starts_with("image/") => "an image".into(),
         k if k.starts_with("video/") => "a video".into(),
         k if k.starts_with("audio/") => "audio".into(),
-        "text/plain" => "plain text".into(),
         k => format!("not a web page ({k})"),
     }
 }
@@ -136,11 +173,17 @@ pub fn extract(html: &str, url: &str) -> Article {
     let html = tidy_emphasis(&unhide_streamed(html));
     let doc = Document::from(&*html);
     even_tables(&doc);
+    math(&doc, &html);
+    let domain = hn::domain(url).unwrap_or_default();
+    sites::tidy_page(&doc, &domain);
     let parsed =
         Readability::with_document(doc, Some(url), Some(config)).and_then(|mut r| r.parse());
     let (md, title) = match parsed {
         Ok(article) => (
-            section_breaks(&drop_metadata(article.text_content.trim())),
+            section_breaks(&sites::tidy_md(
+                &drop_metadata(article.text_content.trim()),
+                &domain,
+            )),
             article
                 .title
                 .split_whitespace()
@@ -189,7 +232,7 @@ fn about(html: &str, url: &str) -> Article {
 }
 
 /// `src` as an absolute address, from the page at `page`.
-fn absolute(page: &str, src: &str) -> Option<String> {
+pub(crate) fn absolute(page: &str, src: &str) -> Option<String> {
     if src.starts_with("https://") || src.starts_with("http://") {
         return Some(src.to_string());
     }
@@ -266,6 +309,91 @@ fn cells<'a>(row: &NodeRef<'a>) -> Vec<NodeRef<'a>> {
         .into_iter()
         .filter(|c| c.is("td, th"))
         .collect()
+}
+
+/// Formulas as text. Pages write them in MathML, with the TeX they came
+/// from alongside (arXiv's, Wikipedia's, KaTeX's), or in TeX, between
+/// dollars, for MathJax to draw in the browser. Either way a reader mode
+/// would make a mess of them: MathML's layout read out as text, or TeX.
+fn math(doc: &Document, html: &str) {
+    let replace = |node: &NodeRef, tex: &str| {
+        let text = crate::tex::to_unicode(tex);
+        node.replace_with(&node.tree.new_text(text));
+    };
+    // Wikipedia hides its MathML, showing a picture of it instead: both go.
+    for node in doc.select(".mwe-math-element").nodes() {
+        let math = node.find(&["math"]);
+        let tex = math
+            .first()
+            .and_then(|m| m.attr("alttext"))
+            .or_else(|| node.find(&["img"]).first().and_then(|img| img.attr("alt")));
+        if let Some(tex) = tex {
+            replace(node, &tex);
+        }
+    }
+    // KaTeX's: the MathML for readers, then its drawing, in HTML.
+    for node in doc.select(".katex").nodes() {
+        if node.is(".katex .katex") {
+            continue;
+        }
+        let tex = node
+            .find(&["annotation"])
+            .into_iter()
+            .find(|a| a.attr("encoding").is_some_and(|e| e.contains("tex")))
+            .map(|a| a.text());
+        if let Some(tex) = tex {
+            replace(node, &tex);
+        }
+    }
+    // MathJax's, once it's read the page: the TeX in a script.
+    for node in doc.select(r#"script[type^="math/tex"]"#).nodes() {
+        let tex = node.text();
+        replace(node, &tex);
+    }
+    for node in doc.select("math").nodes() {
+        let annotation = node
+            .find(&["annotation"])
+            .into_iter()
+            .find(|a| a.attr("encoding").is_some_and(|e| e.contains("tex")))
+            .map(|a| a.text());
+        match node.attr("alttext").or(annotation) {
+            Some(tex) => replace(node, &tex),
+            None => {
+                // MathML alone: its text, which reads well enough for
+                // something short.
+                for a in node.find(&["annotation"]) {
+                    a.remove_from_parent();
+                }
+                let text = node.text().split_whitespace().collect::<Vec<_>>().join(" ");
+                node.replace_with(&node.tree.new_text(text));
+            }
+        }
+    }
+    // TeX in the text, for MathJax or KaTeX to draw in the browser.
+    let lower = html.to_ascii_lowercase();
+    if !lower.contains("mathjax") && !lower.contains("katex") {
+        return;
+    }
+    let Some(body) = doc.select("body").nodes().first().cloned() else {
+        return;
+    };
+    for node in body.descendants() {
+        if !node.is_text() {
+            continue;
+        }
+        let code = node.ancestors_it(None).any(|a| {
+            a.node_name()
+                .is_some_and(|n| matches!(&*n, "pre" | "code" | "script" | "style" | "textarea"))
+        });
+        let text = node.text();
+        if code || !text.contains(['$', '\\']) {
+            continue;
+        }
+        let converted = crate::tex::in_text(&text);
+        if converted != *text {
+            node.set_text(converted);
+        }
+    }
 }
 
 /// React pages that stream (Next.js's, say) send what they render last in
@@ -534,6 +662,53 @@ mod tests {
             absolute(url, "c.jpg").as_deref(),
             Some("https://example.com/blog/c.jpg")
         );
+    }
+
+    #[test]
+    fn reads_papers_whole() {
+        for url in [
+            "https://arxiv.org/abs/2401.12345",
+            "https://arxiv.org/abs/2401.12345v2",
+            "http://www.arxiv.org/pdf/2401.12345.pdf",
+            "https://export.arxiv.org/pdf/2401.12345",
+        ] {
+            let id = if url.contains("v2") {
+                "2401.12345v2"
+            } else {
+                "2401.12345"
+            };
+            assert_eq!(
+                full_text(url),
+                Some(format!("https://arxiv.org/html/{id}")),
+                "{url}"
+            );
+        }
+        assert_eq!(full_text("https://arxiv.org/list/cs.AI/recent"), None);
+        assert_eq!(full_text("https://example.com/abs/1"), None);
+    }
+
+    #[test]
+    fn writes_formulas_as_text() {
+        let para = "This is a sentence of reasonable length for an article. ".repeat(12);
+        let html = format!(
+            r#"<html><head><script src="mathjax.js"></script></head><body><article>
+            <p>{para}</p>
+            <p>LaTeXML: <math alttext="x^{{2}}" display="inline"><msup><mi>x</mi><mn>2</mn></msup></math> ends.</p>
+            <p>KaTeX: <span class="katex"><span class="katex-mathml"><math><semantics><mrow><mi>α</mi></mrow>
+              <annotation encoding="application/x-tex">\alpha</annotation></semantics></math></span>
+              <span class="katex-html" aria-hidden="true">α</span></span> ends.</p>
+            <p>Plain: <math><mi>y</mi><mo>+</mo><mn>1</mn></math> ends.</p>
+            <p>MathJax: \(\beta \leq 1\) and $5 and <code>$x^2$</code>.</p>
+            <p>{para}</p></article></body></html>"#
+        );
+        let Article::Text { md, .. } = extract(&html, "https://example.com/paper") else {
+            panic!("no text");
+        };
+        assert!(md.contains("LaTeXML: x² ends"), "{md}");
+        assert!(md.contains("KaTeX: α ends"), "{md}");
+        assert!(md.contains("Plain: y\\+1 ends"), "{md}");
+        assert!(md.contains("MathJax: β ≤ 1 and $5"), "{md}");
+        assert!(md.contains("`$x^2$`"), "{md}");
     }
 
     #[test]

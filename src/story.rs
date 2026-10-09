@@ -8,7 +8,7 @@
 use crate::article::{self, Article};
 use crate::figure;
 use crate::hn::{self, Comment, Replies, Story, User};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 /// Replies nest this deep, then stay there, so deep threads keep room.
@@ -354,6 +354,8 @@ fn comment(md: &mut String, c: &Comment, depth: usize, context: &Context) {
         "*\\[deleted\\]*".to_string()
     } else if c.by == context.op {
         format!("{} (OP)", author(&c.by))
+    } else if hn::MODERATORS.contains(&c.by.as_str()) {
+        format!("{} (mod)", author(&c.by))
     } else {
         author(&c.by)
     };
@@ -582,6 +584,111 @@ pub fn ago(then: u64, now: u64) -> String {
         s if s < 60 * DAY => format!("{}w ago", s / (7 * DAY)),
         s if s < 365 * DAY => format!("{}mo ago", s / (30 * DAY)),
         s => format!("{}y ago", s / (365 * DAY)),
+    }
+}
+
+/// A document as Markdown to keep, outside lshn: without the marks it
+/// leaves for itself, and with the date things were posted rather than how
+/// long ago, which won't stay true. `times` are when each item (the story,
+/// its comments) was posted, by id.
+pub fn export(md: &str, times: &HashMap<u64, u64>) -> String {
+    let mut out = Vec::new();
+    for line in md.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("<!-- comment:") && trimmed.ends_with("-->") {
+            continue;
+        }
+        if trimmed == crate::render::SECTION_BREAK {
+            out.push("* * *".to_string());
+            continue;
+        }
+        // How to get to a page lshn couldn't read, in lshn.
+        if trimmed.ends_with("or `c` to copy its address.") {
+            if let Some(last) = out.last_mut() {
+                *last = last.trim_end_matches('\\').to_string();
+            }
+            continue;
+        }
+        if let Some(label) = crate::render::rule_label(trimmed) {
+            out.push(format!("---\n\n*{}*", escape(&label)));
+            continue;
+        }
+        out.push(dated(line, times).replace(" \"muted\")", ")"));
+    }
+    // Written out afresh, escaped only where it has to be: lshn escapes
+    // everything it might, which reads badly as plain text.
+    let md = out.join("\n");
+    let arena = comrak::Arena::new();
+    let options = crate::render::options();
+    let root = comrak::parse_document(&arena, &md, &options);
+    // Plain text, laid out, as others know it.
+    for node in root.descendants() {
+        if let comrak::nodes::NodeValue::CodeBlock(code) = &mut node.data_mut().value
+            && code.info == crate::plain::VERBATIM
+        {
+            code.info = "text".into();
+        }
+    }
+    let mut out = String::new();
+    if comrak::format_commonmark(root, &options, &mut out).is_err() {
+        return md;
+    }
+    out
+}
+
+/// `line` with each "3h ago" that links to an item as the day it was
+/// posted.
+fn dated(line: &str, times: &HashMap<u64, u64>) -> String {
+    let mut out = String::new();
+    let mut rest = line;
+    while let Some(start) = rest.find('[') {
+        out.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let link = rest.find("](<").and_then(|close| {
+            let text = &rest[1..close];
+            let target_end = rest[close..].find('>')? + close;
+            let target = &rest[close + 3..target_end];
+            let ago = (text == "now" || text.ends_with(" ago")) && !text.contains(['[', ']']);
+            let id: u64 = target.split_once("item?id=")?.1.parse().ok()?;
+            let time = times.get(&id).filter(|_| ago)?;
+            Some((close, date(*time)))
+        });
+        match link {
+            Some((close, date)) => {
+                out.push('[');
+                out.push_str(&date);
+                rest = &rest[close..];
+            }
+            None => {
+                out.push('[');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// The day `secs` since the epoch fell on, in UTC: 2026-10-09.
+pub fn date(secs: u64) -> String {
+    // Howard Hinnant's days-to-civil.
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year}-{month:02}-{day:02}")
+}
+
+/// When each of `comments` and their replies was posted, by id.
+pub fn times(comments: &[Comment], into: &mut HashMap<u64, u64>) {
+    for c in comments {
+        into.insert(c.id, c.time);
+        times(&c.replies, into);
     }
 }
 
@@ -838,6 +945,26 @@ mod tests {
         );
         // Code isn't touched.
         assert!(html_to_md("<pre><code>&gt; prompt\n</code></pre>").contains("\n> prompt\n"));
+    }
+
+    #[test]
+    fn exports_without_lshns_marks() {
+        let md = format!(
+            "# T\n\n[x.com](<https://x.com>) · [3 points](<https://news.ycombinator.com/item?id=1> \"muted\") · \
+             [2h ago](<https://news.ycombinator.com/item?id=1> \"muted\")\n\n<!-- rule: article from x.com -->\n\n\
+             Text.\n\n{}\n\n---\n\n{}\n\n> **bob** · [5m ago](<https://news.ycombinator.com/item?id=2> \"muted\")\n>\n> Hi \\[3h ago\\].\n",
+            crate::render::SECTION_BREAK,
+            crate::render::comment_marker(2, 0),
+        );
+        let times = HashMap::from([(1, 1_760_000_000), (2, 0)]);
+        // Escaped only where it has to be; a section break is a rule.
+        assert_eq!(
+            export(&md, &times),
+            "# T\n\n[x.com](https://x.com) · [3 points](https://news.ycombinator.com/item?id=1) · \
+             [2025-10-09](https://news.ycombinator.com/item?id=1)\n\n-----\n\n*article from x.com*\n\n\
+             Text.\n\n-----\n\n-----\n\n> **bob** · [1970-01-01](https://news.ycombinator.com/item?id=2)\n> \n> Hi \\[3h ago\\].\n"
+        );
+        assert_eq!(date(951_782_400), "2000-02-29");
     }
 
     #[test]

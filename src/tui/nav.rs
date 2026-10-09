@@ -35,7 +35,7 @@ pub enum Prompt {
     Pick(Picker),
     /// Typing a search of all of HN's stories.
     SearchHn {
-        query: String,
+        search: hn::Search,
     },
     /// Logging in: the username, then the password.
     LoginUser {
@@ -242,24 +242,30 @@ impl App {
                 Outcome::Choose(target) => self.go(target),
                 Outcome::Quit => return true,
             },
-            Prompt::SearchHn { mut query } => match key.code {
+            Prompt::SearchHn { mut search } => match key.code {
                 KeyCode::Esc => {}
-                // An HN link or an item's id (a long number: not a year, say)
+                // A link or an item's id (a long number: not a year, say)
                 // opens it; anything else is searched for.
-                KeyCode::Enter => match hn::parse(&query) {
-                    Some(link) if query.trim().len() >= 6 => self.open_hn(link),
-                    _ if query.trim().is_empty() => {}
-                    _ => self.search_hn(query.trim().to_string()),
+                KeyCode::Enter => match hn::parse(&search.query) {
+                    Some(link) if search.query.trim().len() >= 6 => self.open_hn(link),
+                    _ if search.query.trim().is_empty() => {}
+                    _ => {
+                        search.query = search.query.trim().to_string();
+                        self.search_hn(search);
+                    }
                 },
-                KeyCode::Backspace => {
-                    query.pop();
-                    self.prompt = Some(Prompt::SearchHn { query });
+                _ => {
+                    match key.code {
+                        KeyCode::Backspace => {
+                            search.query.pop();
+                        }
+                        KeyCode::Tab => search.newest = !search.newest,
+                        KeyCode::BackTab => search.since = search.since.next(),
+                        KeyCode::Char(c) if !ctrl => search.query.push(c),
+                        _ => {}
+                    }
+                    self.prompt = Some(Prompt::SearchHn { search });
                 }
-                KeyCode::Char(c) if !ctrl => {
-                    query.push(c);
-                    self.prompt = Some(Prompt::SearchHn { query });
-                }
-                _ => self.prompt = Some(Prompt::SearchHn { query }),
             },
             p @ (Prompt::LoginUser { .. }
             | Prompt::LoginPassword { .. }
@@ -371,6 +377,7 @@ impl App {
     pub(super) fn open_hn(&mut self, link: Link) {
         match link {
             Link::User(name) => self.open_user(name),
+            Link::Web(url) => self.open_web(&url),
             // A reply to you: its story's known.
             Link::Item(id) if self.reply_to_you(id).and_then(|r| r.story_id).is_some() => {
                 let story = self.reply_to_you(id).and_then(|r| r.story_id).unwrap_or(id);
@@ -582,11 +589,15 @@ impl App {
             | Prompt::Passphrase { .. }
             | Prompt::Logout { .. }
             | Prompt::Compose(_) => return None,
-            Prompt::SearchHn { query } => Line::from(vec![
+            Prompt::SearchHn { search } => Line::from(vec![
                 " Search HN: ".bold(),
-                Span::raw(query.clone()),
+                Span::raw(search.query.clone()),
                 "▏".slow_blink(),
-                "  ⏎ search (an HN link or id: open it)  esc cancel".dim(),
+                "  ⇥ ".dim(),
+                Span::raw(if search.newest { "newest" } else { "best" }),
+                "  ⇧⇥ ".dim(),
+                Span::raw(search.since.name()),
+                "  ⏎ search (a link or id: open it)  esc cancel".dim(),
             ]),
             Prompt::Open(target) => Line::from(vec![
                 " Open ".bold(),

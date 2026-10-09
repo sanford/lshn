@@ -14,7 +14,7 @@ mod themes;
 use crate::article::{Article, Source};
 use crate::doc::Doc;
 use crate::fetch::{self, Done, Fetcher, Got, Job, Waiting};
-use crate::hn::{Comment, Feed, Story, User};
+use crate::hn::{self, Comment, Feed, Story, User};
 use crate::omarchy::Follow;
 use crate::store::{self, Cache, Marked, Seen, SeenStore};
 use crate::story::{self, Comments};
@@ -144,11 +144,48 @@ pub fn run(theme: Theme, settings: Settings) -> io::Result<()> {
             restore(info);
         }));
     }
+    set_title_kept(true);
     let result = app.run(&mut terminal);
     set_mouse(app.mouse_on, false);
     set_paste(false);
+    set_title_kept(false);
     ratatui::restore();
     result
+}
+
+/// Keeps the window's title as it was, to put back when lshn's done with
+/// it (`on` false), as xterm's way of saving it has terminals do. Done with,
+/// lshn's progress goes too.
+fn set_title_kept(on: bool) {
+    let mut out = io::stdout();
+    let code = if on { "\x1b[22;0t" } else { "\x1b[23;0t" };
+    let _ = io::Write::write_all(&mut out, code.as_bytes());
+    if !on && shows_progress() {
+        let _ = io::Write::write_all(&mut out, b"\x1b]9;4;0;\x07");
+    }
+    let _ = io::Write::flush(&mut out);
+}
+
+/// Whether the terminal shows progress in its tab (ConEmu's OSC 9;4).
+/// Only those known to: to others (Kitty, older iTerm2s) an OSC 9 is a
+/// notification, to pop up on the desktop.
+fn shows_progress() -> bool {
+    let var = |name: &str| std::env::var(name).unwrap_or_default();
+    if std::env::var_os("WT_SESSION").is_some() || std::env::var_os("ConEmuPID").is_some() {
+        return true;
+    }
+    if var("TERM").contains("ghostty") || var("TERM_PROGRAM") == "ghostty" {
+        return true;
+    }
+    // iTerm2 from 3.6.
+    if var("TERM_PROGRAM") == "iTerm.app" {
+        let version: Vec<u32> = var("TERM_PROGRAM_VERSION")
+            .split('.')
+            .map_while(|n| n.parse().ok())
+            .collect();
+        return version.as_slice() >= [3, 6].as_slice();
+    }
+    false
 }
 
 /// How the terminal can draw pictures, and its cell size in pixels. Asked
@@ -315,7 +352,7 @@ struct App {
     waiting: Waiting,
     feed: Feed,
     /// A search of HN, whose results are the list instead of the feed's.
-    search: Option<String>,
+    search: Option<hn::Search>,
     /// The list's stories, in order, once it's loaded.
     ids: Option<Vec<u64>>,
     feed_error: Option<String>,
@@ -364,6 +401,9 @@ struct App {
     page_docs: HashMap<nav::Page, Doc>,
     /// A page shown in the reader in place of the story.
     page: Option<nav::Page>,
+    /// What the terminal's been told: its window's title, and whether
+    /// something's loading.
+    told: Option<(String, bool)>,
     /// Where following links came from, to go back to.
     history: Vec<nav::Back>,
     /// Pages opened in the browser this time, whose links are dimmed.
@@ -495,6 +535,7 @@ impl App {
             users: HashMap::new(),
             page_docs: HashMap::new(),
             page: None,
+            told: None,
             history: Vec::new(),
             opening: None,
             opening_at: None,
@@ -618,7 +659,70 @@ impl App {
             io::Write::write_all(&mut out, send.as_bytes())?;
         }
         execute!(out, EndSynchronizedUpdate)?;
+        self.tell_terminal();
         Ok(())
+    }
+
+    /// Tells the terminal what's on screen, for its window's title, and
+    /// whether something's loading, for those that show that in their tab.
+    fn tell_terminal(&mut self) {
+        let now = (self.window_title(), self.loading());
+        if self.told.as_ref() == Some(&now) {
+            return;
+        }
+        let mut out = io::stdout();
+        if self.told.as_ref().is_none_or(|(title, _)| *title != now.0) {
+            let title: String = now.0.chars().filter(|&c| !safe::is_unsafe(c)).collect();
+            let _ =
+                ratatui::crossterm::execute!(out, ratatui::crossterm::terminal::SetTitle(title));
+        }
+        if self.told.as_ref().map(|(_, l)| *l) != Some(now.1) && shows_progress() {
+            // Busy for as long as it takes, or not.
+            let state = if now.1 { 3 } else { 0 };
+            let _ = io::Write::write_all(&mut out, format!("\x1b]9;4;{state};\x07").as_bytes());
+            let _ = io::Write::flush(&mut out);
+        }
+        self.told = Some(now);
+    }
+
+    /// The window's title: the story or page being read, or the list.
+    fn window_title(&self) -> String {
+        let reading = self.focus == Focus::Reader;
+        let title = match &self.page {
+            Some(nav::Page::User(name)) if reading => name.clone(),
+            Some(nav::Page::Replies) if reading => "Replies".into(),
+            Some(nav::Page::Web(url)) if reading => {
+                match self.articles.get(&Source::Page(url.clone())) {
+                    Some(crate::article::Article::Text { title, .. }) if !title.is_empty() => {
+                        title.clone()
+                    }
+                    _ => hn::domain(url).unwrap_or_else(|| url.clone()),
+                }
+            }
+            _ if reading => match self.reading.and_then(|id| self.stories.get(&id)) {
+                Some(story) => story.title.clone(),
+                None => String::new(),
+            },
+            _ => String::new(),
+        };
+        if title.is_empty() {
+            match &self.search {
+                Some(search) => format!("lshn · “{}”", search.query),
+                None => format!("lshn · {}", self.feed.name()),
+            }
+        } else {
+            format!("{title} · lshn")
+        }
+    }
+
+    /// Whether what's wanted now is still coming: the list, a story
+    /// being opened, or the article on screen.
+    fn loading(&self) -> bool {
+        let article = self.current_source().is_some_and(|source| {
+            !self.articles.contains_key(&source)
+                && self.asked.contains(&Asked::Article(source.clone()))
+        });
+        self.ids.is_none() && self.feed_error.is_none() || self.opening.is_some() || article
     }
 
     /// Gives the terminal back as it was while `f` runs, then takes it
@@ -630,9 +734,12 @@ impl App {
     ) -> io::Result<T> {
         set_mouse(self.mouse_on, false);
         set_paste(false);
+        set_title_kept(false);
         ratatui::restore();
         let result = f();
         *terminal = ratatui::init();
+        set_title_kept(true);
+        self.told = None;
         set_mouse(self.mouse_on, true);
         set_paste(true);
         terminal.clear()?;
@@ -676,15 +783,15 @@ impl App {
         *self.list.offset_mut() = 0;
     }
 
-    /// Lists the stories matching `query`, best first.
-    fn search_hn(&mut self, query: String) {
-        self.search = Some(query.clone());
+    /// Lists the stories a search finds.
+    fn search_hn(&mut self, search: hn::Search) {
+        self.search = Some(search.clone());
         self.ids = None;
         self.feed_error = None;
         self.filter.clear();
         self.typing = false;
         self.focus = Focus::List;
-        self.send(Job::Search(query), true);
+        self.send(Job::Search(search), true);
         self.chose = false;
         self.refresh();
         self.list.select(None);
@@ -705,7 +812,7 @@ impl App {
         self.asked.retain(|a| matches!(a, Asked::Article(_)));
         self.gone.clear();
         match self.search.clone() {
-            Some(query) => self.send(Job::Search(query), true),
+            Some(search) => self.send(Job::Search(search), true),
             None if self.feed == Feed::Saved => {
                 self.ids = Some(self.saved.newest_first());
                 self.refresh();
@@ -742,7 +849,7 @@ impl App {
                     list_changed = true;
                 }
                 Got::Feed(..) => {}
-                Got::Search(query, result) if self.search.as_ref() == Some(&query) => {
+                Got::Search(search, result) if self.search.as_ref() == Some(&search) => {
                     match result {
                         Ok(ids) => self.ids = Some(ids),
                         Err(e) => self.feed_error = Some(e),
@@ -876,6 +983,23 @@ impl App {
             self.seen.stories.insert(id, seen);
             self.seen.save();
         }
+    }
+
+    /// Marks the selected story read, or unread again: its comments all
+    /// new, next time.
+    fn toggle_seen(&mut self) {
+        let Some((id, _)) = self.current_key() else {
+            return;
+        };
+        if self.seen.stories.remove(&id).is_some() {
+            self.seen.save();
+            self.flash = Some("Marked unread".into());
+        } else {
+            self.note_seen(id);
+            self.flash = Some("Marked read".into());
+        }
+        self.marks.remove(&id);
+        self.rebuild(id);
     }
 
     /// Opens story `id` in the reader, and leaves the one that was there:
@@ -1534,7 +1658,7 @@ impl App {
             KeyCode::Tab => self.switch_view(),
             KeyCode::Char('s') if !ctrl => {
                 self.prompt = Some(nav::Prompt::SearchHn {
-                    query: self.search.clone().unwrap_or_default(),
+                    search: self.search.clone().unwrap_or_default(),
                 });
             }
             KeyCode::Char('>') => self.next_story(1),
@@ -1669,6 +1793,7 @@ impl App {
                 self.list_in_reader = false;
             }
             KeyCode::Char('l') | KeyCode::Right => self.switch_view(),
+            KeyCode::Char('m') => self.toggle_seen(),
             KeyCode::Char('/') => self.typing = true,
             KeyCode::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
@@ -1888,9 +2013,16 @@ impl App {
             title.push(Span::raw("  "));
         }
         title.push(match &self.search {
-            Some(query) => Span::raw(format!("s “{}”", safe::printable(query)))
-                .bold()
-                .underlined(),
+            Some(search) => {
+                let mut name = format!("s “{}”", safe::printable(&search.query));
+                if search.newest {
+                    name.push_str(" newest");
+                }
+                if search.since != hn::Since::Ever {
+                    name.push_str(&format!(" {}", search.since.name()));
+                }
+                Span::raw(name).bold().underlined()
+            }
             None => Span::raw("s Search").dim(),
         });
         title.push(Span::raw("  "));
@@ -2426,14 +2558,16 @@ fn title_lines(
         _ => Style::new(),
     };
     let title = safe::printable(&story.title);
+    let tokens = title_tokens(&title);
     let mut chars: Vec<(char, Style)> = title
         .chars()
+        .zip(tokens)
         .enumerate()
-        .map(|(i, c)| {
+        .map(|(i, (c, token))| {
             let style = if hits.binary_search(&(i as u32)).is_ok() {
                 hit
             } else {
-                plain
+                plain.patch(token)
             };
             (c, style)
         })
@@ -2507,6 +2641,77 @@ fn title_lines(
         .collect()
 }
 
+/// How each character of a title looks for what it's part of: "Show HN:"
+/// and the like at its start, a YC batch, "(YC W24)", a year, "(1987)", or
+/// what a link is, "[pdf]". The rest is as it is.
+fn title_tokens(title: &str) -> Vec<Style> {
+    let chars: Vec<char> = title.chars().collect();
+    let mut styles = vec![Style::new(); chars.len()];
+    const PREFIXES: [&str; 5] = ["Show HN:", "Ask HN:", "Tell HN:", "Launch HN:", "Thank HN:"];
+    if let Some(prefix) = PREFIXES.iter().find(|p| title.starts_with(*p)) {
+        for style in &mut styles[..prefix.chars().count()] {
+            *style = Style::new().cyan();
+        }
+    }
+    let quiet = Style::new().dim();
+    let mut i = 0;
+    while i < chars.len() {
+        let open = chars[i];
+        let close = match open {
+            '(' => ')',
+            '[' => ']',
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let Some(len) = chars[i + 1..].iter().position(|&c| c == close) else {
+            break;
+        };
+        let inside: String = chars[i + 1..i + 1 + len].iter().collect();
+        let style = if open == '(' && yc_batch(&inside) {
+            Some(Style::new().magenta())
+        } else if year(&inside)
+            || (open == '[' && matches!(inside.to_lowercase().as_str(), "pdf" | "video" | "audio"))
+        {
+            Some(quiet)
+        } else {
+            None
+        };
+        if let Some(style) = style {
+            for s in &mut styles[i..=i + 1 + len] {
+                *s = style;
+            }
+        }
+        i += len + 2;
+    }
+    styles
+}
+
+/// "YC W24": Y Combinator's batches, by season and year.
+fn yc_batch(text: &str) -> bool {
+    let Some(batch) = text.strip_prefix("YC ") else {
+        return false;
+    };
+    let mut chars = batch.chars();
+    chars.next().is_some_and(|c| "WSFXP".contains(c))
+        && chars.as_str().len() == 2
+        && chars.all(|c| c.is_ascii_digit())
+}
+
+/// "1987", or a span of them, "2012-2024": when what's linked to is from.
+fn year(text: &str) -> bool {
+    let is_year = |y: &str| {
+        y.len() == 4
+            && y.chars().all(|c| c.is_ascii_digit())
+            && (y.starts_with("1") || y.starts_with("20"))
+    };
+    is_year(text)
+        || text
+            .split_once(['-', '–'])
+            .is_some_and(|(a, b)| is_year(a) && (is_year(b) || b.len() == 2))
+}
+
 fn char_width(c: char) -> usize {
     wrap::width(c.encode_utf8(&mut [0; 4]))
 }
@@ -2554,7 +2759,10 @@ fn draw_help(f: &mut Frame) {
                 ),
                 ("1-7", "Top, New, Best, Ask, Show, Jobs; Saved"),
                 ("/", "Filter the list by title (fuzzy)"),
-                ("s", "Search all of HN's stories (or open an HN link or id)"),
+                (
+                    "s",
+                    "Search all of HN's stories (⇥ best or newest, ⇧⇥ how far back), or open a link or id",
+                ),
                 ("i", "Replies to you, to your latest comments and stories"),
             ],
         ),
@@ -2609,6 +2817,7 @@ fn draw_help(f: &mut Frame) {
                     "Copy: the story's link, the comment, the article… (or drag over text)",
                 ),
                 ("S", "Save the story to read later, or no longer"),
+                ("m", "Mark the story read, or unread again (in the list)"),
                 (
                     "x X",
                     "Hide the story from the lists, or bring it back / show the hidden",
@@ -2790,6 +2999,25 @@ mod tests {
         assert_eq!(k('g', KeyModifiers::CONTROL), KeyCode::Esc);
         assert_eq!(k('n', KeyModifiers::NONE), KeyCode::Char('n'));
         assert_eq!(k('<', KeyModifiers::SHIFT), KeyCode::Char('<'));
+    }
+
+    #[test]
+    fn titles_mark_prefixes_batches_and_years() {
+        let marked = |title: &str| -> String {
+            title
+                .chars()
+                .zip(title_tokens(title))
+                .map(|(c, s)| if s == Style::new() { '.' } else { c })
+                .collect()
+        };
+        assert_eq!(marked("Show HN: Foo (YC W24)"), "Show HN:.....(YC W24)");
+        assert_eq!(marked("A paper (1987) [pdf]"), "........(1987).[pdf]");
+        assert_eq!(marked("Why (2012-2024) (plain)"), "....(2012-2024)........");
+        assert_eq!(
+            marked("Not at the start: Ask HN: (YC Q99) (123)"),
+            ".".repeat(40)
+        );
+        assert_eq!(marked("Unclosed (1987"), ".".repeat(14));
     }
 
     #[test]

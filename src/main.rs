@@ -7,18 +7,22 @@ mod doc;
 mod editor;
 mod fetch;
 mod figure;
+mod guess;
 mod highlight;
 mod hn;
 mod html;
 mod omarchy;
 mod open;
 mod palettes;
+mod plain;
 mod render;
 mod safe;
 mod session;
+mod sites;
 mod sizing;
 mod store;
 mod story;
+mod tex;
 mod theme;
 mod tui;
 mod wrap;
@@ -43,7 +47,8 @@ use theme::{Choice, Mode, Theme};
 struct Args {
     /// The list to start with (top, new, best, ask, show or jobs), or a
     /// story or comment to open: its id, or its link on HN (someone's page
-    /// too). With output that isn't a terminal, a story is printed
+    /// too). Or any other page, to read as an article. With output that
+    /// isn't a terminal, a story or page is printed
     #[arg(value_name = "LIST|ID|LINK")]
     what: Option<String>,
 
@@ -63,6 +68,11 @@ struct Args {
     /// tokyo-night, which colors everything
     #[arg(long)]
     theme: Option<Choice>,
+
+    /// Print the story (its article and comments) or the page as
+    /// Markdown, to keep: `lshn 12345 --markdown > story.md`
+    #[arg(long, requires = "what")]
+    markdown: bool,
 
     /// Read settings from FILE instead of ~/.lshn/config.toml
     #[arg(long, value_name = "FILE")]
@@ -125,11 +135,14 @@ fn run(args: Args) -> io::Result<()> {
         Some(what) => match (Feed::from_str(what, true), hn::parse(what)) {
             (Ok(feed), _) => (Some(feed), None),
             (_, Some(link)) => (None, Some(link)),
-            _ => {
-                return Err(io::Error::other(format!(
-                    "{what}: not a list (top, new, best, ask, show, jobs), an id or an HN link"
-                )));
+            // A link without its `https://`: `example.com/post`.
+            _ if what.contains('.') && !what.contains(char::is_whitespace) => {
+                match hn::parse(&format!("https://{what}")) {
+                    Some(link) => (None, Some(link)),
+                    None => return Err(not_a_list(what)),
+                }
             }
+            _ => return Err(not_a_list(what)),
         },
     };
     let feed = feed.or(config.feed).unwrap_or(Feed::Top);
@@ -151,9 +164,26 @@ fn run(args: Args) -> io::Result<()> {
         None => Theme::chosen(choice, color),
     };
     let width = args.width.or(config.width).filter(|&w| w > 0);
+    if args.markdown {
+        let md = match &open {
+            Some(hn::Link::Item(id)) => story_markdown(*id, true)?,
+            Some(hn::Link::Web(url)) => page_markdown(url, true),
+            _ => {
+                return Err(io::Error::other(
+                    "--markdown is for a story, a comment's story, or a page",
+                ));
+            }
+        };
+        let mut out = io::stdout().lock();
+        out.write_all(md.as_bytes())?;
+        return out.flush();
+    }
     match &open {
         Some(hn::Link::Item(id)) if !interactive => {
             return print_story(*id, &theme, width.unwrap_or_else(terminal_width));
+        }
+        Some(hn::Link::Web(url)) if !interactive => {
+            return print_page(url, &theme, width.unwrap_or_else(terminal_width));
         }
         Some(hn::Link::User(_)) if !interactive => {
             return Err(io::Error::other(
@@ -234,6 +264,13 @@ fn list(feed: Feed) -> io::Result<()> {
 /// Prints a story, its article and its comments, rendered: for a
 /// comment, the story it's on.
 fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
+    let md = story_markdown(id, false)?;
+    print_md(&md, theme, width)
+}
+
+/// A story's document, its article and its comments: for a comment, the
+/// story it's on. `export`: as Markdown to keep, outside lshn.
+fn story_markdown(id: u64, export: bool) -> io::Result<String> {
     let mut story = hn::story(id).map_err(io::Error::other)?;
     if story.title.is_empty() && story.parent.is_some() {
         let id = hn::story_of(id).map_err(io::Error::other)?;
@@ -267,11 +304,43 @@ fn print_story(id: u64, theme: &Theme, width: usize) -> io::Result<()> {
         },
         &|_| None,
     );
-    let mut lines = render::render(&md, width, theme, None, None).lines;
+    if !export {
+        return Ok(md);
+    }
+    let mut times = std::collections::HashMap::from([(story.id, story.time)]);
+    if let Ok(comments) = &thread {
+        story::times(comments, &mut times);
+    }
+    Ok(story::export(&md, &times))
+}
+
+/// Prints a page that isn't on HN, read as its article is.
+fn print_page(url: &str, theme: &Theme, width: usize) -> io::Result<()> {
+    print_md(&page_markdown(url, false), theme, width)
+}
+
+fn page_markdown(url: &str, export: bool) -> String {
+    let article = article::fetch(url);
+    let md = story::page_markdown(url, Some(&article), &|_| None);
+    if export {
+        story::export(&md, &Default::default())
+    } else {
+        md
+    }
+}
+
+fn print_md(md: &str, theme: &Theme, width: usize) -> io::Result<()> {
+    let mut lines = render::render(md, width, theme, None, None).lines;
     for span in lines.iter_mut().flat_map(|l| &mut l.spans) {
         span.style = theme.recolor(span.style);
     }
     ansi::print(&lines, &mut io::stdout().lock())
+}
+
+fn not_a_list(what: &str) -> io::Error {
+    io::Error::other(format!(
+        "{what}: not a list (top, new, best, ask, show, jobs), an id or a link"
+    ))
 }
 
 /// Width for printed output: $COLUMNS, else the terminal's, else 80.

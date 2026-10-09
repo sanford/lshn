@@ -235,6 +235,9 @@ struct PostHits {
     hits: Vec<PostHit>,
 }
 
+/// HN's moderators, whose comments say so: they speak for the site.
+pub const MODERATORS: &[&str] = &["dang", "tomhow"];
+
 /// Whether `name` could be an HN username: letters, digits, `-` and `_`.
 pub fn is_username(name: &str) -> bool {
     !name.is_empty()
@@ -397,21 +400,29 @@ pub fn story_of(id: u64) -> Result<u64, String> {
         .ok_or_else(|| format!("No story has item {id}"))
 }
 
-/// What's typed or pasted to open something on HN: a link to a story, a
-/// comment or someone, a link without its `https://`, or an item's id.
+/// What's typed or pasted to open something: a link to a story, a comment
+/// or someone on HN, one without its `https://`, an item's id, or a link to
+/// any other page, to read as an article.
 pub fn parse(text: &str) -> Option<Link> {
     let text = text.trim();
     if let Ok(id) = text.parse() {
         return Some(Link::Item(id));
     }
-    link(text).or_else(|| link(&format!("https://{text}")))
+    let web = (text.starts_with("https://") || text.starts_with("http://"))
+        && !text.contains(char::is_whitespace)
+        && domain(text).is_some();
+    link(text)
+        .or_else(|| link(&format!("https://{text}")))
+        .or_else(|| web.then(|| Link::Web(text.to_string())))
 }
 
-/// Where a link on HN goes, when it's somewhere lshn can show.
+/// Where a link goes, when it's somewhere lshn can show.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Link {
     Item(u64),
     User(String),
+    /// A page that isn't on HN, read as an article.
+    Web(String),
 }
 
 /// The story or user an HN link is to, like
@@ -443,13 +454,81 @@ struct SearchHit {
     id: String,
 }
 
-/// Stories matching `query`, best first, from Algolia's search.
-pub fn search(query: &str) -> Result<Vec<u64>, String> {
-    let results: SearchResults = agent()
-        .get(format!("{ALGOLIA}/search"))
-        .query("query", query)
+/// A search of HN's stories: what for, in what order, and how far back.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Search {
+    pub query: String,
+    /// The newest first, rather than the best.
+    pub newest: bool,
+    pub since: Since,
+}
+
+/// How far back a search goes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Since {
+    #[default]
+    Ever,
+    Day,
+    Week,
+    Month,
+    Year,
+}
+
+impl Since {
+    pub fn name(self) -> &'static str {
+        match self {
+            Since::Ever => "all time",
+            Since::Day => "past day",
+            Since::Week => "past week",
+            Since::Month => "past month",
+            Since::Year => "past year",
+        }
+    }
+
+    /// The next further back, round to the past day again.
+    pub fn next(self) -> Since {
+        match self {
+            Since::Ever => Since::Day,
+            Since::Day => Since::Week,
+            Since::Week => Since::Month,
+            Since::Month => Since::Year,
+            Since::Year => Since::Ever,
+        }
+    }
+
+    fn seconds(self) -> Option<u64> {
+        const DAY: u64 = 24 * 60 * 60;
+        match self {
+            Since::Ever => None,
+            Since::Day => Some(DAY),
+            Since::Week => Some(7 * DAY),
+            Since::Month => Some(30 * DAY),
+            Since::Year => Some(365 * DAY),
+        }
+    }
+}
+
+/// Stories matching a search, from Algolia's: the best first, or the
+/// newest.
+pub fn search(search: &Search) -> Result<Vec<u64>, String> {
+    let endpoint = if search.newest {
+        "search_by_date"
+    } else {
+        "search"
+    };
+    let mut request = agent()
+        .get(format!("{ALGOLIA}/{endpoint}"))
+        .query("query", &search.query)
         .query("tags", "story")
-        .query("hitsPerPage", "60")
+        .query("hitsPerPage", "60");
+    if let Some(seconds) = search.since.seconds() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs());
+        let after = now.saturating_sub(seconds);
+        request = request.query("numericFilters", format!("created_at_i>{after}"));
+    }
+    let results: SearchResults = request
         .call()
         .map_err(|e| e.to_string())?
         .body_mut()
@@ -546,6 +625,11 @@ mod tests {
             Some(Link::User("pg".into()))
         );
         assert_eq!(parse("rust async"), None);
+        assert_eq!(parse("node.js"), None);
+        assert_eq!(
+            parse("https://example.com/a.md"),
+            Some(Link::Web("https://example.com/a.md".into()))
+        );
     }
 
     #[test]

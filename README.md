@@ -55,11 +55,12 @@ While hacking on it, `./run.sh [ARGS]` (or `.\run.ps1 [ARGS]` on Windows) format
 lshn                 # the front page
 lshn best            # ...or new, best, ask, show, jobs, saved
 lshn 12345           # open a story or comment: its id, or its link on HN
+lshn example.com/a   # or read any page, as a story's article is read
 lshn 12345 | less -R # not a terminal: print a story, its article and comments
 lshn | head          # not a terminal: list the front page (points, comments, title, link)
 ```
 
-`-w 100` caps the text width. `-p` prints without colors, as does setting `NO_COLOR`. `--theme NAME` picks a color theme, and `--no-mouse` leaves the mouse to the terminal, so its own text selection works.
+`--markdown` prints a story, its article and its comments, or a page, as Markdown to keep, with the date each was posted: `lshn 12345 --markdown > story.md`. `-w 100` caps the text width. `-p` prints without colors, as does setting `NO_COLOR`. `--theme NAME` picks a color theme, and `--no-mouse` leaves the mouse to the terminal, so its own text selection works.
 
 ### Keys
 
@@ -76,8 +77,9 @@ In the list:
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title; `Esc` clears it |
 | `1`–`7` | Top, New, Best, Ask, Show, Jobs; and Saved, the stories you've saved, the latest first |
-| `s` | Search all of HN's stories: the matches, best first, become the list. An HN link or an item's id opens it instead |
+| `s` | Search all of HN's stories: the matches, best first, become the list. While typing, `Tab` puts the newest first instead, and `⇧Tab` goes only so far back: the past day, week, month or year. A link or an item's id opens it instead |
 | `S` | Save the story to read later (★ in the lists), or no longer |
+| `m` | Mark the story read, or unread again |
 | `x` | Hide the story from the lists, for good (90 days, anyway); `X` shows the hidden ones, crossed out, and `x` brings one back |
 | `O` | Keep the outline beside the preview, or not |
 | `q` `Esc` | Quit |
@@ -145,13 +147,17 @@ lshn knows who you are once you've logged in (it keeps your username, which is p
 
 Stories you've opened fade in the list, and when they've had comments since, say how many: `+12`. Open one again and its new comments are marked `new`, and the comments' heading counts them. They stay marked while you read, and aren't new any more once you move on.
 
-What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stories and comments show the moment it starts, and are replaced as fresh ones arrive, without losing your place. Without a connection, what's saved is still there to read. Articles are fetched once. What you've read is in `~/.lshn/seen.json`, for 90 days. Stories you've saved are in `~/.lshn/saved.json`, and those you've hidden in `~/.lshn/hidden.json`, for 90 days.
+What it fetches is kept in `~/.lshn/cache/` for a week, so the last lists, stories and comments show the moment it starts, and are replaced as fresh ones arrive, without losing your place. Without a connection, what's saved is still there to read. Articles are fetched once. What you've read is in `~/.lshn/seen.json`, for 90 days: deleting it forgets it all, and `m` in the list forgets one story. Stories you've saved are in `~/.lshn/saved.json`, and those you've hidden in `~/.lshn/hidden.json`, for 90 days.
 
 ### Where it comes from
 
 Story lists and stories come from HN's [official API](https://github.com/HackerNews/API). Each story's comments come from [Algolia's HN API](https://hn.algolia.com/api) in one request, however many there are, with the top-level comments put in HN's order. Articles are fetched from their sites and reduced to their text with [dom_smoothie](https://github.com/niklak/dom_smoothie), a port of Firefox's Readability. Pages that are really apps, videos or PDFs say so, with the address and `w` to open the website in the browser or `c` to copy it. So do pages that show their text with JavaScript, which lshn doesn't run; and a page with no article to read shows what it says about itself instead, its picture and description.
 
-Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer.
+Markdown pages (a README on GitHub's raw site, say) are read as Markdown, and plain text (an RFC) as it's laid out, with its paragraphs flowing to fit. A link to a paper on arXiv opens the paper itself, from the HTML arXiv makes of most of them, rather than its abstract or a PDF. Formulas, whether a page has them in MathML (arXiv's, Wikipedia's) or in TeX for MathJax or KaTeX to draw, are written out in Unicode: `x² + y² = z²`, `∑ᵢ aᵢ`, `√(dₖ)`. And what some sites put among an article's paragraphs that isn't the article, such as a photo's credit, "Listen to this story", or Wikipedia's references, is left out.
+
+Comments follow HN's convention for quoting: a paragraph starting with `>` is shown in italics, so a reply reads as what it answers and then the answer. The story's author is marked `(OP)`, and HN's moderators `(mod)`. Code is colored by its language, and code that doesn't say what language it's in (most in comments) is colored when there's no mistaking it.
+
+In the list, a title's `Show HN:`, `Ask HN:` and the like stand out, as does a YC batch, `(YC W24)`; a year, `(1987)`, and what a link is, `[pdf]`, are quieter. The terminal's title says what's on screen, and terminals that show progress in their tabs (Windows Terminal, Ghostty, iTerm2 3.6) show when something's loading.
 
 An article's pictures are shown with it: the first at the top, the rest after the paragraphs they're in (the preview shows only the first). Terminals that can draw pictures (iTerm2, Kitty, WezTerm, Ghostty, and those with Sixel) show the picture itself; others, and tmux, get a rougher version drawn in colored half blocks. `images = false` turns them off.
 

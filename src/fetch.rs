@@ -32,7 +32,7 @@ const ARTICLE_WORKERS: usize = 6;
 pub enum Job {
     Feed(Feed),
     /// Stories matching a search.
-    Search(String),
+    Search(hn::Search),
     Story(u64),
     /// The story a comment is on.
     StoryOf(u64),
@@ -57,7 +57,7 @@ pub enum Job {
 
 pub enum Got {
     Feed(Feed, Result<Vec<u64>, String>),
-    Search(String, Result<Vec<u64>, String>),
+    Search(hn::Search, Result<Vec<u64>, String>),
     Story(u64, Result<Story, String>),
     /// The story comment `.0` is on.
     StoryOf(u64, Result<u64, String>),
@@ -241,9 +241,9 @@ fn run(job: Job, tx: &Sender<Done>, cache: &Cache) -> Option<()> {
             }
             send(Got::Feed(feed, fresh), true)
         }
-        Job::Search(query) => {
-            let found = hn::search(&query);
-            send(Got::Search(query, found), true)
+        Job::Search(search) => {
+            let found = hn::search(&search);
+            send(Got::Search(search, found), true)
         }
         Job::StoryOf(id) => send(Got::StoryOf(id, hn::story_of(id)), true),
         Job::Story(id) => {

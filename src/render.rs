@@ -542,13 +542,40 @@ impl Renderer<'_> {
     }
 
     fn code_block_lines(&mut self, info: &str, literal: &str) {
-        let lang = highlight::language(info);
+        let lang = match highlight::language(info) {
+            // Most code in comments doesn't say what it's in.
+            "" if info != crate::plain::VERBATIM => crate::guess::guess(literal),
+            lang => lang,
+        };
         let theme = self.theme;
         let base = theme.code_block();
         let lines = highlight::highlight(literal, lang, theme, base);
         // Where a long line wraps, its continuations start with a mark, so
         // they can't be taken for lines of their own.
         const MORE: &str = "↪";
+        if info == crate::plain::VERBATIM {
+            // Plain text, laid out by its writer: as it is, but not code.
+            let avail = self.avail().saturating_sub(2);
+            let literal = literal.strip_suffix('\n').unwrap_or(literal);
+            for line in literal.split('\n') {
+                let line = vec![Span::raw(squeeze(&expand_tabs(line), avail))];
+                for (i, chunk) in wrap::hard_wrap(line, avail).into_iter().enumerate() {
+                    let width = wrap::spans_width(&chunk);
+                    let mut spans = Vec::new();
+                    if i > 0 {
+                        spans.push(Span::styled(format!("{MORE} "), theme.dim()));
+                    }
+                    spans.extend(chunk);
+                    trim_end(&mut spans);
+                    self.emit(spans);
+                    self.body(if i > 0 { 2 } else { 0 }, width);
+                    if i > 0 {
+                        self.joins(Join::Direct);
+                    }
+                }
+            }
+            return;
+        }
         if !theme.color {
             // No background to set the code apart, so indent it instead.
             let avail = self.avail().saturating_sub(4);
@@ -1141,6 +1168,41 @@ fn trim_end(spans: &mut Vec<Span<'static>>) {
 
 /// A break between sections, drawn as a centred `*   *   *`: smaller than
 /// a rule, which marks where the article ends.
+/// `line` made to fit `width`, if it can be, by narrowing its gaps: the
+/// runs of three or more spaces that line up a header's columns. Each is
+/// left at least two wide; the widest go first.
+fn squeeze(line: &str, width: usize) -> String {
+    let mut over = wrap::width(line).saturating_sub(width);
+    if over == 0 || !line.contains("   ") {
+        return line.to_string();
+    }
+    // The text in between, and the gaps after each piece.
+    let mut pieces: Vec<(&str, usize)> = Vec::new();
+    let mut rest = line;
+    while let Some(start) = rest.find("   ") {
+        let gap = rest[start..].len() - rest[start..].trim_start_matches(' ').len();
+        pieces.push((&rest[..start], gap));
+        rest = &rest[start + gap..];
+    }
+    pieces.push((rest, 0));
+    // Indentation is a gap too: a date set against the right margin.
+    while over > 0 {
+        let Some(widest) = pieces
+            .iter_mut()
+            .filter(|(_, gap)| *gap > 2)
+            .max_by_key(|(_, gap)| *gap)
+        else {
+            break;
+        };
+        widest.1 -= 1;
+        over -= 1;
+    }
+    pieces
+        .iter()
+        .map(|(text, gap)| format!("{text}{}", " ".repeat(*gap)))
+        .collect()
+}
+
 pub const SECTION_BREAK: &str = "<!-- section break -->";
 
 /// The label of a rule written as `<!-- rule: label -->`: Markdown's
@@ -1179,6 +1241,19 @@ mod tests {
         assert_eq!(r.big, [0, 2]);
         assert!(text.contains(&"Section".to_string()), "{text:?}");
         assert!(text.contains(&"│ Quoted".to_string()), "{text:?}");
+    }
+
+    #[test]
+    fn squeezes_gaps_to_fit() {
+        let header = format!("Network Working Group{}D. Waitzman", " ".repeat(20));
+        let header = header.as_str();
+        assert_eq!(
+            squeeze(header, 40),
+            format!("Network Working Group{}D. Waitzman", " ".repeat(8))
+        );
+        assert_eq!(squeeze(header, 80), header);
+        // Never under two spaces.
+        assert_eq!(squeeze("    a   b", 4), "  a  b");
     }
 
     #[test]
