@@ -60,7 +60,18 @@ lshn 12345 | less -R # not a terminal: print a story, its article and comments
 lshn | head          # not a terminal: list the front page (points, comments, title, link)
 ```
 
-`--markdown` prints a story, its article and its comments, or a page, as Markdown to keep, with the date each was posted: `lshn 12345 --markdown > story.md`. `-w 100` caps the text width. `-p` prints without colors, as does setting `NO_COLOR`. `--theme NAME` picks a color theme, and `--no-mouse` leaves the mouse to the terminal, so its own text selection works.
+`-w 100` caps the text width. `-p` prints without colors, as does setting `NO_COLOR`. `--theme NAME` picks a color theme, and `--no-mouse` leaves the mouse to the terminal, so its own text selection works.
+
+### Keeping a story or page as Markdown
+
+`--markdown` prints a story, its article and its comments as Markdown to keep, with the date each was posted rather than how long ago. Any other page comes out the same way, so it turns a link into a Markdown file:
+
+```sh
+lshn 12345 --markdown > story.md
+lshn https://example.com/post --markdown > post.md
+```
+
+A page is its title, a link to it, and its article, read as a story's is: its text without the site's menus and footers, its links whole, its formulas as text, and its pictures as links to them. An arXiv paper is the whole paper. A page lshn can't read (a PDF, or one drawn by JavaScript) says so instead.
 
 ### Keys
 
