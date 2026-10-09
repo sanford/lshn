@@ -1,2 +1,4 @@
 /target
 /.claude/scheduled_tasks.lock
+# Editors' backups.
+*~
