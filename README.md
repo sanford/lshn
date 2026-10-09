@@ -71,7 +71,7 @@ In the list:
 | `g` `G` | The first story, the last |
 | `Enter` | Read the story full screen |
 | `→` `l` | Go to the story, as `Tab` does: beside the list, if there's room |
-| `Tab` | Go to the story. On a terminal 110 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
+| `Tab` | Go to the story. On a terminal 80 columns or wider the list stays beside it, and `Tab` goes back and forth between them |
 | `C` | Jump the preview to the comments, and back |
 | `Space` `b` | Page through the preview |
 | `/` | Filter the list by title; `Esc` clears it |

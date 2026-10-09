@@ -44,13 +44,9 @@ const LIST_AHEAD: usize = 40;
 /// fetched ahead, so they're there when selected.
 const PREFETCH_BEHIND: usize = 2;
 const PREFETCH_AHEAD: usize = 5;
-/// Terminals at least this wide keep the list on screen when `Tab` goes to
-/// the story: the story beside it still gets about 65 columns of text, a
-/// better line length for reading than the whole width.
-const WIDE: u16 = 110;
-/// Narrower than this, there's only room for one pane: the list, or the
-/// story.
-const NARROW: u16 = 80;
+/// A terminal this wide shows the list beside the story, whether previewing
+/// it or reading it after `Tab`; narrower, there's only room for one pane.
+const WIDE: u16 = 80;
 /// How long the picture waits for scrolling to stop before it's drawn.
 const FIGURE_SETTLE: Duration = Duration::from_millis(150);
 
@@ -1712,7 +1708,7 @@ impl App {
             return false;
         }
         if key.code == KeyCode::Enter {
-            if self.list_in_reader && self.body_width >= NARROW {
+            if self.list_in_reader && self.body_width >= WIDE {
                 self.list_in_reader = false;
             } else {
                 self.leave_reader();
@@ -1828,7 +1824,7 @@ impl App {
         self.list_area = Rect::default();
         let reader_only = self.focus == Focus::Reader && !self.list_in_reader;
         self.body_width = body.width;
-        let narrow = body.width < NARROW;
+        let narrow = body.width < WIDE;
         if reader_only || (narrow && self.focus == Focus::Reader) {
             // A column of margin on each side.
             let area = Rect {
@@ -3121,7 +3117,7 @@ mod tests {
     #[test]
     fn tab_switches_views() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        for (width, both) in [(160, true), (100, false)] {
+        for (width, both) in [(WIDE, true), (WIDE - 1, false)] {
             let mut app = App::new(
                 Theme::plain(),
                 None,
