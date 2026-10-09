@@ -186,3 +186,11 @@ user = "you"            # whose replies i shows, without logging in
 Themes of your own go in `~/.lshn/themes/`, as `NAME.toml` or `NAME/colors.toml` in [Omarchy's](https://omarchy.org) `colors.toml` format, and are listed with the others.
 
 `lshn --completions zsh` (or bash, fish, elvish, powershell) prints a script that completes lshn's options, and `lshn --man` its man page.
+
+## License
+
+Copyright (C) 2026 Sanford Lincoln
+
+`lshn` is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version. See [LICENSE](LICENSE).
+
+The color themes in [`themes/`](themes/) are [Omarchy](https://omarchy.org)'s, copyright (c) David Heinemeier Hansson, and used under the MIT License (see [themes/LICENSE](themes/LICENSE)), except lshn's own `hn`, `amber` and `green`.
