@@ -75,7 +75,7 @@ pub fn markdown(md: &str, url: &str) -> Article {
         .children()
         .find(|n| !matches!(n.data().value, NodeValue::FrontMatter(_)));
     if let Some(first) = first
-        && matches!(first.data().value, NodeValue::Heading(h) if h.level == 1)
+        && matches!(first.data().value, NodeValue::Heading(ref h) if h.level == 1)
     {
         title = render::plain_text(first).trim().to_string();
         first.detach();

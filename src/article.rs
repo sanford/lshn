@@ -536,10 +536,10 @@ mod tests {
             md.trim(),
             "| Model | Count | AFR |\n\
              | ----- | ----- | --- |\n\
-             | A1 | 12 | 1\\.5 |\n\
+             | A1 | 12 | 1.5 |\n\
              | merged |  | 2 |\n\
              | short |  |  |\n\
-             | Totals |  | 3\\.5 |",
+             | Totals |  | 3.5 |",
         );
     }
 
@@ -706,7 +706,7 @@ mod tests {
         };
         assert!(md.contains("LaTeXML: x² ends"), "{md}");
         assert!(md.contains("KaTeX: α ends"), "{md}");
-        assert!(md.contains("Plain: y\\+1 ends"), "{md}");
+        assert!(md.contains("Plain: y+1 ends"), "{md}");
         assert!(md.contains("MathJax: β ≤ 1 and $5"), "{md}");
         assert!(md.contains("`$x^2$`"), "{md}");
     }

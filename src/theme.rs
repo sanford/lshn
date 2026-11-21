@@ -289,6 +289,7 @@ impl Theme {
             Important => Color::Magenta,
             Warning => Color::Yellow,
             Caution => Color::Red,
+            _ => Color::Blue,
         };
         self.s(Style::new().fg(fg))
     }
